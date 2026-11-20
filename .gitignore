@@ -1,0 +1,7 @@
+.DS_Store
+Thumbs.db
+*.log
+node_modules/
+# 個人行程資料不進 repo
+trips/
+*.trip.json

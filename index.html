@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>行程手冊 Roadbook</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&family=Space+Grotesk:wght@500;700&family=JetBrains+Mono:wght@500;700&display=swap">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <div class="brand"><b>行程手冊</b><span>ROADBOOK</span><span id="appVersion"></span></div>
+    <button class="btn primary" id="btnNew" type="button">規劃新行程</button>
+    <button class="btn" id="btnSaved" type="button">我的行程</button>
+    <button class="btn" id="btnShowImport" type="button">匯入 JSON</button>
+    <button class="btn" id="btnCopy" type="button">複製文字版</button>
+    <button class="btn" id="btnDownloadMd" type="button">下載 Markdown</button>
+    <button class="btn" id="btnDownloadJson" type="button">下載 JSON</button>
+    <button class="btn" id="btnPrint" type="button">列印 / PDF</button>
+  </div>
+  <nav class="secnav" aria-label="章節">
+    <div class="wrap">
+      <a href="#overview">總覽</a><a href="#days">每日行程</a><a href="#budget">預算</a>
+      <a href="#bookings">預訂時程</a><a href="#checklist">行前清單</a><a href="#notes">注意事項</a><a href="#emergency">緊急聯絡</a><a href="#refine">調整行程</a>
+    </div>
+  </nav>
+</header>
+
+<main class="wrap">
+  <div class="banner" id="sampleBanner">
+    <p><b>這是範例手冊。</b>填寫目的地、天數與旅伴需求後，網站會產生一段規劃提示詞，貼到 claude.ai 由 Claude 排出動線、預算與注意事項，再把結果匯入這裡。</p>
+    <button class="btn primary" type="button" data-open-planner>開始規劃我的旅程</button>
+  </div>
+
+  <section class="planner" id="planner" hidden>
+    <h2>需求訪談</h2>
+    <p class="lead">資訊越完整，行程越貼近需求。只有目的地與天數是必填，其餘未填的部分會列在手冊的「規劃假設」中，方便你核對。</p>
+    <form id="planForm" novalidate>
+      <div class="grid">
+        <div class="field"><label for="fDest">目的地 *</label><input id="fDest" required placeholder="例：北海道、首爾、義大利托斯卡尼"></div>
+        <div class="field"><label for="fDays">天數 *</label><input id="fDays" type="number" min="1" max="14" value="5"><small>上限 14 天；更長的旅程建議分段規劃</small></div>
+        <div class="field"><label for="fStart">出發日期</label><input id="fStart" type="date"><small>影響季節、氣候與節慶建議</small></div>
+        <div class="field"><label for="fFrom">出發城市</label><input id="fFrom" value="台北（桃園機場）"></div>
+        <div class="field full"><span class="lbl">旅伴組成</span>
+          <div class="counter">
+            <div><label for="fAdults">成人</label><input id="fAdults" type="number" min="0" value="2"></div>
+            <div><label for="fSeniors">長輩（65+）</label><input id="fSeniors" type="number" min="0" value="0"></div>
+            <div><label for="fKids">兒童</label><input id="fKids" type="number" min="0" value="0"></div>
+            <div><label for="fKidAges">兒童年齡</label><input id="fKidAges" placeholder="例：4、8" style="width:110px"></div>
+          </div>
+        </div>
+        <div class="field full"><span class="lbl">旅行型態</span><div class="chips" data-group="style" data-single="1"></div></div>
+        <div class="field"><label for="fPace">步調</label>
+          <select id="fPace"><option>悠閒（每天 2–3 個重點）</option><option selected>適中（每天 3–4 個重點）</option><option>緊湊（每天 5 個以上）</option></select></div>
+        <div class="field"><label for="fBudget">每人預算（新台幣，含機票）</label><input id="fBudget" type="number" min="0" step="1000" placeholder="例：45000"></div>
+        <div class="field"><label for="fStay">住宿等級</label>
+          <select id="fStay"><option>經濟（青旅、商務旅館）</option><option selected>舒適（三至四星、交通便利）</option><option>精品（設計旅店、溫泉旅館）</option><option>奢華（五星、景觀房）</option></select></div>
+        <div class="field"><label for="fTransport">交通偏好</label>
+          <select id="fTransport"><option selected>大眾運輸為主</option><option>自駕</option><option>包車 / 計程車為主</option><option>由規劃師判斷</option></select></div>
+        <div class="field full"><span class="lbl">興趣（可複選）</span><div class="chips" data-group="interests"></div></div>
+        <div class="field"><label for="fDiet">飲食限制</label><input id="fDiet" placeholder="例：不吃牛、素食、海鮮過敏"></div>
+        <div class="field"><label for="fMobility">體力與行動考量</label><input id="fMobility" placeholder="例：長輩膝蓋不好、推嬰兒車"></div>
+        <div class="field full"><label for="fNotes">其他需求</label><textarea id="fNotes" placeholder="例：一定要去環球影城；想拍穿和服的照片；結婚紀念日想訂一間景觀餐廳"></textarea></div>
+      </div>
+      <div class="actions">
+        <button class="btn primary" type="submit" id="btnGenerate">產生規劃提示詞</button>
+        <button class="btn ghost" type="button" id="btnCancelPlan">取消</button>
+        <span class="status" id="planStatus" role="status"></span>
+      </div>
+    </form>
+  </section>
+
+  <section class="planner" id="promptPanel" hidden>
+    <h2 id="promptTitle">規劃提示詞</h2>
+    <ol class="steps">
+      <li><b>複製提示詞</b>，到 <a href="https://claude.ai/new" target="_blank" rel="noopener">claude.ai</a> 開一個新對話貼上送出。</li>
+      <li>等 Claude 回覆完整的 JSON（約 1–2 分鐘），按回覆右下角的複製按鈕。</li>
+      <li>貼到下方「匯入」欄位，按「匯入手冊」。也可以直接選擇之前下載的 .json 檔。</li>
+    </ol>
+    <div class="field"><label for="promptText">提示詞</label><textarea id="promptText" class="promptbox" readonly></textarea></div>
+    <div class="actions">
+      <button class="btn primary" type="button" id="btnCopyPrompt">複製提示詞</button>
+      <button class="btn ghost" type="button" id="btnClosePrompt">關閉</button>
+    </div>
+    <div class="field" style="margin-top:18px"><label for="importText">匯入 Claude 回覆的 JSON</label>
+      <textarea id="importText" class="promptbox" placeholder="把 Claude 的整段回覆貼在這裡，前後多出的文字或 ```json 標記會自動去除"></textarea></div>
+    <div class="actions">
+      <button class="btn primary" type="button" id="btnImport">匯入手冊</button>
+      <label class="btn" for="importFile">選擇 .json 檔</label><input type="file" id="importFile" accept=".json,application/json" hidden>
+      <span class="status" id="importStatus" role="status"></span>
+    </div>
+  </section>
+
+  <section class="planner" id="savedPanel" hidden>
+    <h2>我的行程</h2>
+    <p class="lead">行程儲存在這個瀏覽器中，換裝置或清除網站資料後不會保留。需要長期保存請用「下載 JSON」，之後可以再匯入。</p>
+    <div class="saved" id="savedList"></div>
+  </section>
+
+  <div id="book"></div>
+
+  <section class="block" id="refine">
+    <h2>調整行程 <span class="eyebrow">Revise</span></h2>
+    <div class="panel">
+      <p style="margin:0 0 10px;color:var(--muted)">用一句話告訴規劃師要改什麼。網站會把目前的手冊和你的需求組成提示詞，其餘內容會保持一致。</p>
+      <div class="refine">
+        <textarea id="refineText" aria-label="調整需求" placeholder="例：第 3 天改輕鬆一點；把大阪住宿換到梅田；加一天去奈良"></textarea>
+        <button class="btn primary" type="button" id="btnRefine">產生調整提示詞</button>
+      </div>
+      <p class="status" id="refineStatus" role="status"></p>
+    </div>
+  </section>
+
+  <footer>交通時間、票價與開放時間為規劃估算，出發前請以官方網站與訂位紀錄為準。地圖連結會開啟 Google 地圖。</footer>
+</main>
+
+
+<script src="js/version.js"></script>
+<script src="js/sample.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
