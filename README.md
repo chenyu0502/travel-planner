@@ -43,7 +43,7 @@
 | 檔案 | 內容 |
 |---|---|
 | `index.html` | 頁面結構 |
-| `css/style.css` | 樣式（淺色、深色、列印） |
+| `css/style.css` | 樣式（淺色、深色、列印），以及版面風格：航線（預設）、旅行手帳、機場看板（`<html data-style>`，選擇存在 localStorage 的 `rb.style`） |
 | `js/app.js` | 表單、提示詞、匯入匯出、手冊排版 |
 | `js/sample.js` | 範例行程（京都・大阪 5 日） |
 | `js/version.js` | 版本號 |

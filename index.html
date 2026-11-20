@@ -6,16 +6,21 @@
 <title>行程手冊 Roadbook</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&family=Space+Grotesk:wght@500;700&family=JetBrains+Mono:wght@500;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&family=Noto+Serif+TC:wght@600;900&family=Space+Grotesk:wght@500;700&family=JetBrains+Mono:wght@500;700&display=swap">
 <link rel="stylesheet" href="css/style.css">
+<script>
+  // 版面風格：在畫面繪製前套用，避免先閃一下預設風格
+  try { document.documentElement.dataset.style = localStorage.getItem("rb.style") || "route"; }
+  catch (e) { document.documentElement.dataset.style = "route"; }
+</script>
 </head>
 <body>
 <header class="top">
   <div class="wrap">
     <div class="brand"><a class="cf-home" id="cfHome" href="/" hidden>Claude Flow</a><b>行程手冊</b><span>ROADBOOK</span><span id="appVersion"></span></div>
-    <button class="btn primary" id="btnNew" type="button">規劃新行程</button>
-    <button class="btn" id="btnSaved" type="button">我的行程</button>
-    <button class="btn" id="btnShowImport" type="button">匯入<span class="long">JSON</span></button>
+    <button class="btn primary" id="btnNew" type="button"><span><span class="long">規劃</span>新行程</span></button>
+    <button class="btn" id="btnSaved" type="button"><span><span class="xlong">我的</span>行程</span></button>
+    <button class="btn" id="btnShowImport" type="button"><span>匯入<span class="long"> JSON</span></span></button>
     <details class="menu" id="exportMenu">
       <summary class="btn">匯出<span class="caret" aria-hidden="true"></span></summary>
       <div class="menu-list">
@@ -24,7 +29,13 @@
         <button class="btn" id="btnDownloadJson" type="button">下載 JSON</button>
       </div>
     </details>
-    <button class="btn" id="btnPrint" type="button">列印<span class="long">/ PDF</span></button>
+    <button class="btn" id="btnPrint" type="button"><span>列印<span class="long"> / PDF</span></span></button>
+    <details class="menu" id="styleMenu">
+      <summary class="btn style-btn" aria-label="版面風格" title="版面風格">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="13.5" cy="6.5" r="1.5" fill="currentColor" stroke="none"/><circle cx="17.5" cy="10.5" r="1.5" fill="currentColor" stroke="none"/><circle cx="8.5" cy="7.5" r="1.5" fill="currentColor" stroke="none"/><circle cx="6.5" cy="12.5" r="1.5" fill="currentColor" stroke="none"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.9 0 1.7-.7 1.7-1.7 0-.4-.2-.8-.4-1.1-.3-.3-.4-.7-.4-1.1 0-.9.7-1.7 1.7-1.7h2c3 0 5.5-2.5 5.5-5.5C22 6 17.5 2 12 2z"/></svg>
+      </summary>
+      <div class="menu-list style-list" id="styleList" role="menu" aria-label="版面風格"></div>
+    </details>
   </div>
   <nav class="secnav" aria-label="章節">
     <div class="wrap">

@@ -628,11 +628,38 @@ $("#btnDownloadJson").addEventListener("click", () => {
   download(fileBase() + ".json", JSON.stringify(data, null, 2), "application/json;charset=utf-8");
 });
 $("#btnPrint").addEventListener("click", () => window.print());
-// 匯出選單：選了項目或點選單以外的地方就收起來
-const exportMenu = $("#exportMenu");
-exportMenu.querySelector(".menu-list").addEventListener("click", e => { if (e.target.closest("button")) exportMenu.open = false; });
-document.addEventListener("click", e => { if (exportMenu.open && !exportMenu.contains(e.target)) exportMenu.open = false; });
-document.addEventListener("keydown", e => { if (e.key === "Escape" && exportMenu.open) { exportMenu.open = false; exportMenu.querySelector("summary").focus(); } });
+// 頂列選單（匯出、版面風格）：選了項目、點選單以外的地方或按 Esc 就收起來；同時只開一個
+const menus = [...document.querySelectorAll(".top details.menu")];
+menus.forEach(m => {
+  m.querySelector(".menu-list").addEventListener("click", e => { if (e.target.closest("button")) m.open = false; });
+  m.addEventListener("toggle", () => { if (m.open) menus.forEach(o => { if (o !== m) o.open = false; }); });
+});
+document.addEventListener("click", e => menus.forEach(m => { if (m.open && !m.contains(e.target)) m.open = false; }));
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape") return;
+  menus.forEach(m => { if (m.open) { m.open = false; m.querySelector("summary").focus(); } });
+});
+
+/* ---------- 版面風格 ---------- */
+const STYLES_UI = [
+  { key: "route", name: "航線", desc: "清爽的青綠與琥珀色，隨系統切換深淺色", sw: ["#0d5a6b", "#d99a12", "#eef2f1", "#ffffff"] },
+  { key: "notebook", name: "旅行手帳", desc: "紙張、藏青墨色與郵戳紅，明朝體標題", sw: ["#10233f", "#b23a2e", "#f3eedd", "#ad8a2e"] },
+  { key: "board", name: "機場看板", desc: "深色底與翻牌看板黃，方角等寬字", sw: ["#0b0f14", "#f5b301", "#121922", "#e8edf2"] },
+];
+function currentStyle() { return document.documentElement.dataset.style || "route"; }
+function renderStyleList() {
+  const cur = currentStyle();
+  $("#styleList").innerHTML = STYLES_UI.map(x => `<button class="btn style-opt" type="button" role="menuitemradio" aria-checked="${x.key === cur}" data-style-key="${x.key}">
+    <span class="sw" aria-hidden="true">${x.sw.map(c => `<i style="background:${c}"></i>`).join("")}</span><b>${esc(x.name)}</b><small>${esc(x.desc)}</small></button>`).join("");
+}
+$("#styleList").addEventListener("click", e => {
+  const b = e.target.closest("[data-style-key]"); if (!b) return;
+  document.documentElement.dataset.style = b.dataset.styleKey;
+  // 存純文字（不經 store 的 JSON），index.html 開頭的腳本才能直接讀
+  try { localStorage.setItem("rb.style", b.dataset.styleKey); } catch {}
+  renderStyleList();
+});
+renderStyleList();
 
 /* ---------- 啟動 ---------- */
 $("#appVersion").textContent = "v" + window.RB_VERSION;
