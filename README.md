@@ -26,10 +26,16 @@
 雙擊 `start.bat`（需要 Python 或 Node.js 其中一個），瀏覽器會開啟 http://localhost:8090 。
 也可以直接用瀏覽器開啟 `index.html`。
 
-## 資料儲存
+## 資料儲存與分享
 
-- 行程存在瀏覽器的 localStorage，只有這台電腦的這個瀏覽器看得到；換裝置或清除網站資料後就會消失。
-- 長期保存請用「下載 JSON」，之後可用「匯入 JSON」還原。
+| 執行環境 | 存在哪裡 | 誰看得到 |
+|---|---|---|
+| Claude Flow 的 `/travel/` | Firestore `trips/{ID}`（由 Claude Flow 提供存取介面） | 建立者在任何裝置都看得到；知道連結（`/travel/#trip=<ID>`）的其他登入使用者可以看，只有建立者能修改與刪除 |
+| 本機預覽（`start.bat` 或直接開 `index.html`） | 瀏覽器 localStorage | 只有這台電腦的這個瀏覽器 |
+
+- 本 repo 不載入 Firebase。在 Claude Flow 底下時，Claude Flow 的登入檢查會提供 `window.ClaudeFlowTravel`（`listMyTrips`、`getTrip`、`saveTrip`、`deleteTrip`），並發出 `claudeflow:travel-ready` 事件；`js/app.js` 偵測到就改用雲端。介面與權限規則定義在 Claude_Flow 的 `src/travel-store.ts` 與 `firestore.rules`。
+- 行前清單的勾選狀態只存在各自的瀏覽器，不會同步給其他人。
+- 長期保存或傳給沒有帳號的人，可以用「下載 JSON」，之後再「匯入 JSON」。
 - **repo 是公開的，不要把真實行程（日期、住宿、旅伴）commit 進來。** `.gitignore` 已排除 `trips/` 與 `*.trip.json`。
 
 ## 檔案結構

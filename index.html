@@ -34,6 +34,7 @@
     <p><b>這是範例手冊。</b>填寫目的地、天數與旅伴需求後，網站會產生一段規劃提示詞，貼到 claude.ai 由 Claude 排出動線、預算與注意事項，再把結果匯入這裡。</p>
     <button class="btn primary" type="button" data-open-planner>開始規劃我的旅程</button>
   </div>
+  <div class="sharebar" id="shareBar" hidden></div>
 
   <section class="planner" id="planner" hidden>
     <h2>需求訪談</h2>
@@ -96,7 +97,7 @@
 
   <section class="planner" id="savedPanel" hidden>
     <h2>我的行程</h2>
-    <p class="lead">行程儲存在這個瀏覽器中，換裝置或清除網站資料後不會保留。需要長期保存請用「下載 JSON」，之後可以再匯入。</p>
+    <p class="lead" id="savedLead"></p>
     <div class="saved" id="savedList"></div>
   </section>
 

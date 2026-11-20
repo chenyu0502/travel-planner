@@ -265,35 +265,175 @@ $("#btnCopy").addEventListener("click", async () => {
   }
 });
 
-/* ---------- 儲存 ---------- */
-function saveTrip(t) {
-  if (t.isSample) return;
+/* ---------- 儲存 ----------
+ * 在 Claude Flow 的 /travel/ 底下執行時，登入檢查會提供 window.ClaudeFlowTravel（雲端行程，存在 Firestore），
+ * 行程存到雲端，可用 #trip=<ID> 連結分享給其他登入的親友（唯讀）。
+ * 本機預覽（start.bat）沒有這個介面，行程存在瀏覽器 localStorage。
+ */
+let cloud = null;
+/** 目前顯示中的行程來源：sample 範例、local 本機、cloud 雲端；cloud 時另有 id、isOwner、ownerName */
+let meta = { source: "sample" };
+const TRIP_ID_RE = /^[A-Za-z0-9]{10,40}$/;
+const shareUrl = id => location.origin + location.pathname + "#trip=" + id;
+function setHash(id) {
+  // replaceState 不會觸發 hashchange，避免存檔後又重新讀一次
+  try { history.replaceState(null, "", id ? "#trip=" + id : location.pathname + location.search); } catch {}
+}
+function hashTripId() {
+  const m = location.hash.match(/^#trip=([A-Za-z0-9]+)$/);
+  return m && TRIP_ID_RE.test(m[1]) ? m[1] : null;
+}
+
+/** 顯示行程並更新來源資訊（分享列、唯讀時隱藏調整行程） */
+function show(t, m) {
+  meta = m;
+  render(t);
+  const bar = $("#shareBar"), readOnly = m.source === "cloud" && !m.isOwner;
+  $("#refine").hidden = readOnly;
+  const refineLink = document.querySelector('.secnav a[href="#refine"]'); if (refineLink) refineLink.hidden = readOnly;
+  if (m.source === "cloud" && m.isOwner) {
+    bar.innerHTML = `<p><b>已存到雲端。</b>把連結傳給親友，他們登入 Claude Flow 後就能看（唯讀）。</p>
+      <button class="btn primary" type="button" data-act="copy-link">複製分享連結</button>`;
+  } else if (readOnly) {
+    bar.innerHTML = `<p><b>${esc(m.ownerName || "其他使用者")} 分享的行程（唯讀）。</b>想修改的話，先存一份到你的行程。</p>
+      <button class="btn primary" type="button" data-act="fork">存一份到我的行程</button>`;
+  } else if (m.source === "local" && cloud) {
+    bar.innerHTML = `<p><b>這份行程只存在這台電腦。</b>存到雲端後才能分享給親友。</p>
+      <button class="btn primary" type="button" data-act="upload">存到雲端</button>`;
+  } else bar.innerHTML = "";
+  bar.hidden = !bar.innerHTML;
+}
+
+async function copyText(text, okMsg) {
+  try { await navigator.clipboard.writeText(text); toast(okMsg); }
+  catch {
+    const ta = document.createElement("textarea"); ta.value = text; ta.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:0";
+    document.body.append(ta); ta.select(); let ok = false; try { ok = document.execCommand("copy"); } catch {} ta.remove();
+    toast(ok ? okMsg : "無法自動複製，請手動複製網址列的連結");
+  }
+}
+const tripData = t => { const d = { ...t }; delete d.isSample; return d; };
+const cloudError = err => "雲端存取失敗：" + (err && err.message ? err.message : "請確認網路連線後再試一次");
+
+/** 存檔。雲端模式：更新自己的行程或新增一份；本機模式：存 localStorage。回傳是否成功 */
+async function saveTrip(t, { asNew = false, targetId } = {}) {
+  if (t.isSample) return false;
+  if (cloud) {
+    try {
+      const own = meta.source === "cloud" && meta.isOwner ? meta.id : null;
+      const id = await cloud.saveTrip(asNew ? null : (targetId || own), tripData(t));
+      t.id = id; setHash(id); store.set("rb.current", "cloud:" + id);
+      show(t, { source: "cloud", id, isOwner: true, ownerName: cloud.user.name });
+      return true;
+    } catch (err) { toast(cloudError(err)); return false; }
+  }
   const list = store.get("rb.trips", []).filter(x => x.id !== t.id);
   list.unshift({ id: t.id, title: t.title, savedAt: new Date().toISOString(), data: t });
   store.set("rb.trips", list.slice(0, 20)); store.set("rb.current", t.id);
+  show(t, { source: "local" });
+  return true;
 }
-function showSaved() {
-  const list = store.get("rb.trips", []);
+
+async function openCloudTrip(id) {
+  try {
+    const rec = await cloud.getTrip(id);
+    if (!rec) { toast("找不到這份行程，可能已被刪除"); return false; }
+    const t = normalize(rec.data); t.id = rec.id; t.isSample = false;
+    setHash(rec.id); if (rec.isOwner) store.set("rb.current", "cloud:" + rec.id);
+    show(t, { source: "cloud", id: rec.id, isOwner: rec.isOwner, ownerName: rec.ownerName });
+    window.scrollTo({ top: 0 });
+    return true;
+  } catch (err) { toast(cloudError(err)); return false; }
+}
+function openLocalTrip(id) {
+  const x = store.get("rb.trips", []).find(x => x.id === id);
+  if (!x) return false;
+  setHash(null); store.set("rb.current", id);
+  show(normalize(x.data), { source: "local" });
+  return true;
+}
+function openSample() { setHash(null); store.set("rb.current", ""); show(normalize(window.RB_SAMPLE), { source: "sample" }); }
+
+$("#shareBar").addEventListener("click", async e => {
+  const act = e.target.closest("[data-act]")?.dataset.act; if (!act) return;
+  if (act === "copy-link") return copyText(shareUrl(meta.id), "已複製分享連結");
+  e.target.disabled = true;
+  if (act === "fork" && await saveTrip({ ...trip }, { asNew: true })) toast("已存一份到你的行程，可以開始修改");
+  if (act === "upload") {
+    const localId = trip.id;
+    if (await saveTrip({ ...trip }, { asNew: true })) {
+      store.set("rb.trips", store.get("rb.trips", []).filter(x => x.id !== localId));
+      toast("已存到雲端");
+    }
+  }
+  e.target.disabled = false;
+});
+
+const rowHtml = (title, sub, buttons) => `<div class="row"><span><b>${esc(title)}</b> <span class="status mono">${esc(sub)}</span></span>
+  <span class="row-actions">${buttons}</span></div>`;
+async function showSaved() {
   const box = $("#savedList");
-  box.innerHTML = (list.length ? list.map(x => `<div class="row"><span><b>${esc(x.title)}</b> <span class="status mono">${esc(x.savedAt.slice(0,10))}</span></span>
-    <span style="display:flex;gap:6px"><button class="btn" type="button" data-load="${esc(x.id)}">開啟</button><button class="btn ghost" type="button" data-del="${esc(x.id)}">刪除</button></span></div>`).join("")
-    : `<p class="status">還沒有儲存的行程。產生第一份手冊後會自動存在這裡。</p>`)
-    + `<div class="row"><span>範例：京都・大阪 5 日</span><button class="btn" type="button" data-load="sample">開啟範例</button></div>`;
-  $("#savedPanel").hidden = false; $("#planner").hidden = true;
+  $("#savedPanel").hidden = false; $("#planner").hidden = true; $("#promptPanel").hidden = true;
+  $("#savedLead").textContent = cloud
+    ? "雲端的行程登入 Claude Flow 後在任何裝置都看得到，也可以複製連結分享給親友。只存在這台電腦的行程，可以按「存到雲端」。"
+    : "行程儲存在這個瀏覽器中，換裝置或清除網站資料後不會保留。需要長期保存請用「下載 JSON」，之後可以再匯入。";
+  let html = "";
+  if (cloud) {
+    box.innerHTML = `<p class="status">讀取雲端行程中…</p>`;
+    try {
+      const mine = await cloud.listMyTrips();
+      html += `<h3 class="saved-h">雲端行程</h3>` + (mine.length
+        ? mine.map(x => rowHtml(x.title, (x.updatedAt || "").slice(0, 10),
+            `<button class="btn" type="button" data-cloud="${esc(x.id)}">開啟</button><button class="btn" type="button" data-link="${esc(x.id)}">複製連結</button><button class="btn ghost" type="button" data-cdel="${esc(x.id)}">刪除</button>`)).join("")
+        : `<p class="status">還沒有雲端行程。產生或匯入行程後會自動存到這裡。</p>`);
+    } catch (err) { html += `<p class="status err">${esc(cloudError(err))}</p>`; }
+  }
+  const local = store.get("rb.trips", []);
+  if (local.length || !cloud) {
+    html += (cloud ? `<h3 class="saved-h">只存在這台電腦</h3>` : "") + (local.length
+      ? local.map(x => rowHtml(x.title, x.savedAt.slice(0, 10),
+          `<button class="btn" type="button" data-load="${esc(x.id)}">開啟</button>${cloud ? `<button class="btn" type="button" data-up="${esc(x.id)}">存到雲端</button>` : ""}<button class="btn ghost" type="button" data-del="${esc(x.id)}">刪除</button>`)).join("")
+      : `<p class="status">還沒有儲存的行程。產生第一份手冊後會自動存在這裡。</p>`);
+  }
+  html += rowHtml("範例：京都・大阪 5 日", "", `<button class="btn" type="button" data-load="sample">開啟範例</button>`);
+  box.innerHTML = html;
   $("#savedPanel").scrollIntoView({ block: "start" });
 }
+function confirmClick(btn) {
+  if (btn.dataset.confirm === "1") return true;
+  btn.dataset.confirm = "1"; btn.textContent = "確認刪除"; return false;
+}
 $("#btnSaved").addEventListener("click", () => $("#savedPanel").hidden ? showSaved() : ($("#savedPanel").hidden = true));
-$("#savedList").addEventListener("click", e => {
-  const ld = e.target.closest("[data-load]"), del = e.target.closest("[data-del]");
-  if (ld) {
-    const id = ld.dataset.load;
-    if (id === "sample") { render(normalize(window.RB_SAMPLE)); store.set("rb.current", ""); }
-    else { const x = store.get("rb.trips", []).find(x => x.id === id); if (x) { render(normalize(x.data)); store.set("rb.current", id); } }
+$("#savedList").addEventListener("click", async e => {
+  const b = e.target.closest("button"); if (!b) return;
+  const d = b.dataset;
+  if (d.load) {
+    if (d.load === "sample") openSample(); else openLocalTrip(d.load);
     $("#savedPanel").hidden = true; window.scrollTo({ top: 0 });
-  }
-  if (del) {
-    if (del.dataset.confirm !== "1") { del.dataset.confirm = "1"; del.textContent = "確認刪除"; return; }
-    store.set("rb.trips", store.get("rb.trips", []).filter(x => x.id !== del.dataset.del)); showSaved();
+  } else if (d.cloud) {
+    if (await openCloudTrip(d.cloud)) $("#savedPanel").hidden = true;
+  } else if (d.link) {
+    copyText(shareUrl(d.link), "已複製分享連結");
+  } else if (d.up) {
+    const x = store.get("rb.trips", []).find(x => x.id === d.up); if (!x) return;
+    b.disabled = true;
+    if (await saveTrip(normalize(x.data), { asNew: true })) {
+      store.set("rb.trips", store.get("rb.trips", []).filter(y => y.id !== d.up));
+      toast("已存到雲端"); showSaved();
+    } else b.disabled = false;
+  } else if (d.del) {
+    if (!confirmClick(b)) return;
+    store.set("rb.trips", store.get("rb.trips", []).filter(x => x.id !== d.del));
+    if (meta.source === "local" && trip.id === d.del) openSample();
+    showSaved();
+  } else if (d.cdel) {
+    if (!confirmClick(b)) return;
+    b.disabled = true;
+    try {
+      await cloud.deleteTrip(d.cdel);
+      if (meta.source === "cloud" && meta.id === d.cdel) openSample();
+      toast("已刪除"); showSaved();
+    } catch (err) { toast(cloudError(err)); b.disabled = false; }
   }
 });
 
@@ -411,7 +551,7 @@ $("#planForm").addEventListener("submit", e => {
   const f = readForm(), st = $("#planStatus");
   if (!f.destination || !f.days) { st.className = "status err"; st.textContent = "請填寫目的地與天數。"; return; }
   st.className = "status"; st.textContent = "";
-  pendingRequest = f; pendingBase = null;
+  pendingRequest = f; pendingBase = null; pendingMeta = null;
   showPrompt(buildPrompt(f), "規劃提示詞：" + f.destination + " " + f.days + " 天");
 });
 
@@ -420,7 +560,7 @@ $("#btnRefine").addEventListener("click", () => {
   if (!ask) { st.className = "status err"; st.textContent = "請先輸入要調整的內容。"; return; }
   st.className = "status"; st.textContent = "";
   const current = { ...trip }; delete current.request; delete current.isSample;
-  pendingBase = trip; pendingRequest = trip.request;
+  pendingBase = trip; pendingMeta = meta; pendingRequest = trip.request;
   showPrompt(`${ROLE}
 
 以下是目前的旅遊手冊 JSON：
@@ -432,7 +572,7 @@ ${JSON.stringify(current)}
 ${SCHEMA}`, "調整提示詞");
 });
 
-let pendingRequest = null, pendingBase = null;
+let pendingRequest = null, pendingBase = null, pendingMeta = null;
 
 /* 從 Claude 的回覆中取出 JSON：接受純 JSON、```json 區塊，或前後夾帶文字 */
 function extractJson(text) {
@@ -445,17 +585,21 @@ function extractJson(text) {
   if (b <= a) throw new SyntaxError("JSON 不完整");
   return JSON.parse(body.slice(a, b + 1));
 }
-function importTrip(text) {
+async function importTrip(text) {
   const st = $("#importStatus");
   try {
     const t = normalize(extractJson(text));
     t.isSample = false;
-    if (pendingBase && !pendingBase.isSample) t.id = pendingBase.id;
+    // 調整行程：沿用原本的行程（本機用同一個 ID；雲端在 saveTrip 依 meta 更新同一份）
+    const refining = !!pendingBase && !pendingBase.isSample;
+    if (refining) t.id = pendingBase.id;
+    const targetId = refining && pendingMeta && pendingMeta.source === "cloud" && pendingMeta.isOwner ? pendingMeta.id : undefined;
     if (pendingRequest) { t.request = pendingRequest; if (!t.people) t.people = (pendingRequest.adults + pendingRequest.seniors + pendingRequest.kids) || null; }
-    render(t); saveTrip(t);
-    pendingBase = null; pendingRequest = null;
+    pendingBase = null; pendingMeta = null; pendingRequest = null;
     $("#promptPanel").hidden = true; $("#refineText").value = "";
-    window.scrollTo({ top: 0 }); toast("手冊已匯入並儲存");
+    const saved = await saveTrip(t, { asNew: !refining, targetId });
+    if (!saved) show(t, { source: "local" }); // 雲端存檔失敗：先顯示，避免使用者以為匯入失敗
+    window.scrollTo({ top: 0 }); if (saved) toast(cloud ? "手冊已匯入並存到雲端" : "手冊已匯入並儲存");
   } catch (err) {
     st.className = "status err";
     st.textContent = err instanceof SyntaxError
@@ -487,9 +631,41 @@ $("#btnPrint").addEventListener("click", () => window.print());
 
 /* ---------- 啟動 ---------- */
 $("#appVersion").textContent = "v" + window.RB_VERSION;
+const underClaudeFlow = location.pathname.startsWith("/travel/") || !!document.getElementById("cf-gate-style");
 // 在 Claude Flow 的 /travel/ 底下執行時，顯示回 Claude Flow 首頁的連結；本機預覽時不顯示。
-if (location.pathname.startsWith("/travel/")) $("#cfHome").hidden = false;
-const curId = store.get("rb.current", "");
-const cur = curId && store.get("rb.trips", []).find(x => x.id === curId);
-try { render(normalize(cur ? cur.data : window.RB_SAMPLE)); } catch { render(normalize(window.RB_SAMPLE)); }
+if (underClaudeFlow) $("#cfHome").hidden = false;
+
+/** 等 Claude Flow 的登入檢查提供雲端介面；它的程式比這裡晚執行，所以先檢查、沒有再等事件 */
+function waitForCloud(ms) {
+  return new Promise(resolve => {
+    if (window.ClaudeFlowTravel) return resolve(window.ClaudeFlowTravel);
+    const timer = setTimeout(() => resolve(null), ms);
+    window.addEventListener("claudeflow:travel-ready", e => { clearTimeout(timer); resolve(e.detail || window.ClaudeFlowTravel || null); }, { once: true });
+  });
+}
+function openLastLocal() {
+  const curId = store.get("rb.current", "");
+  if (curId && !curId.startsWith("cloud:") && openLocalTrip(curId)) return;
+  openSample();
+}
+
+(async () => {
+  // 先記下連結與上次開啟的行程：等待雲端時的暫時畫面不能改動它們
+  const fromHash = hashTripId();
+  const last = store.get("rb.current", "");
+  if (!underClaudeFlow) { try { openLastLocal(); } catch { openSample(); } return; }
+  // 暫時畫面（頁面在登入檢查通過前是隱藏的）：只顯示，不改網址與紀錄
+  const localLast = !last.startsWith("cloud:") && store.get("rb.trips", []).find(x => x.id === last);
+  try { show(normalize(localLast ? localLast.data : window.RB_SAMPLE), { source: localLast ? "local" : "sample" }); } catch { show(normalize(window.RB_SAMPLE), { source: "sample" }); }
+  // 登入檢查要等登入狀態與使用者資料，給足時間；逾時就以本機模式繼續
+  cloud = await waitForCloud(30000);
+  if (!cloud) { toast("無法連線到 Claude Flow，行程只會存在這台電腦"); return; }
+  if (fromHash) { if (!(await openCloudTrip(fromHash))) openLastLocal(); }
+  else if (last.startsWith("cloud:")) { if (!(await openCloudTrip(last.slice(6)))) openSample(); }
+  else show(trip, meta); // 重新整理分享列（本機行程顯示「存到雲端」）
+  window.addEventListener("hashchange", () => {
+    const id = hashTripId();
+    if (id && id !== meta.id) openCloudTrip(id);
+  });
+})();
 })();
