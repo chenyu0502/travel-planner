@@ -628,6 +628,11 @@ $("#btnDownloadJson").addEventListener("click", () => {
   download(fileBase() + ".json", JSON.stringify(data, null, 2), "application/json;charset=utf-8");
 });
 $("#btnPrint").addEventListener("click", () => window.print());
+// 匯出選單：選了項目或點選單以外的地方就收起來
+const exportMenu = $("#exportMenu");
+exportMenu.querySelector(".menu-list").addEventListener("click", e => { if (e.target.closest("button")) exportMenu.open = false; });
+document.addEventListener("click", e => { if (exportMenu.open && !exportMenu.contains(e.target)) exportMenu.open = false; });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && exportMenu.open) { exportMenu.open = false; exportMenu.querySelector("summary").focus(); } });
 
 /* ---------- 啟動 ---------- */
 $("#appVersion").textContent = "v" + window.RB_VERSION;

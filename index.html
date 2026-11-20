@@ -15,11 +15,16 @@
     <div class="brand"><a class="cf-home" id="cfHome" href="/" hidden>Claude Flow</a><b>行程手冊</b><span>ROADBOOK</span><span id="appVersion"></span></div>
     <button class="btn primary" id="btnNew" type="button">規劃新行程</button>
     <button class="btn" id="btnSaved" type="button">我的行程</button>
-    <button class="btn" id="btnShowImport" type="button">匯入 JSON</button>
-    <button class="btn" id="btnCopy" type="button">複製文字版</button>
-    <button class="btn" id="btnDownloadMd" type="button">下載 Markdown</button>
-    <button class="btn" id="btnDownloadJson" type="button">下載 JSON</button>
-    <button class="btn" id="btnPrint" type="button">列印 / PDF</button>
+    <button class="btn" id="btnShowImport" type="button">匯入<span class="long">JSON</span></button>
+    <details class="menu" id="exportMenu">
+      <summary class="btn">匯出<span class="caret" aria-hidden="true"></span></summary>
+      <div class="menu-list">
+        <button class="btn" id="btnCopy" type="button">複製文字版</button>
+        <button class="btn" id="btnDownloadMd" type="button">下載 Markdown</button>
+        <button class="btn" id="btnDownloadJson" type="button">下載 JSON</button>
+      </div>
+    </details>
+    <button class="btn" id="btnPrint" type="button">列印<span class="long">/ PDF</span></button>
   </div>
   <nav class="secnav" aria-label="章節">
     <div class="wrap">
