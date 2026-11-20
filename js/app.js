@@ -487,6 +487,8 @@ $("#btnPrint").addEventListener("click", () => window.print());
 
 /* ---------- 啟動 ---------- */
 $("#appVersion").textContent = "v" + window.RB_VERSION;
+// 在 Claude Flow 的 /travel/ 底下執行時，顯示回 Claude Flow 首頁的連結；本機預覽時不顯示。
+if (location.pathname.startsWith("/travel/")) $("#cfHome").hidden = false;
 const curId = store.get("rb.current", "");
 const cur = curId && store.get("rb.trips", []).find(x => x.id === curId);
 try { render(normalize(cur ? cur.data : window.RB_SAMPLE)); } catch { render(normalize(window.RB_SAMPLE)); }

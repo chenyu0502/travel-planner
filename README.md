@@ -4,7 +4,15 @@
 
 - 純靜態網頁（HTML、CSS、JavaScript），不需要建置，也不需要安裝套件。
 - **不呼叫任何 API、不需要 API 金鑰**：網站產生規劃提示詞，貼到 claude.ai 由 Claude 規劃，再把回覆的 JSON 匯入網站排版。
-- 規劃預計做成 [Claude Flow](https://github.com/chenyu0502/Claude_Flow) 的子網站 `/travel/`，共用登入，只有登入的親友看得到。
+- 發布在 [Claude Flow](https://github.com/chenyu0502/Claude_Flow) 的子網站 `/travel/`，共用登入，只有登入的親友看得到。
+
+## 發布流程
+
+1. 合併到 `main`。
+2. GitHub Actions（`.github/workflows/notify-claude-flow.yml`）呼叫 Vercel Deploy Hook，Claude Flow 重新部署。
+3. Claude Flow 建置時由 `scripts/fetch-travel.mjs` 下載本 repo 的 `index.html`、`css/`、`js/`，並插入登入檢查。
+
+首次設定：在 Vercel 的 Claude Flow 專案建立 Deploy Hook（分支 `master`），把網址存到本 repo 的 Secret `VERCEL_DEPLOY_HOOK`。沒有設定時 Actions 會略過，不會失敗。
 
 ## 使用方式
 

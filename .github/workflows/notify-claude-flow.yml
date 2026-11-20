@@ -1,0 +1,28 @@
+# 合併到 main 後通知 Claude Flow 重新部署
+# Claude Flow（https://claude-flow-chi.vercel.app/travel/）建置時會抓本 repo 最新的 main，
+# 這個工作通知它重新部署，旅遊規劃的更新才會同步上去。
+# Vercel Deploy Hook 網址存在 Secret VERCEL_DEPLOY_HOOK；沒有設定時略過。
+name: 通知 Claude Flow 重新部署
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 呼叫 Vercel Deploy Hook
+        env:
+          DEPLOY_HOOK: ${{ secrets.VERCEL_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$DEPLOY_HOOK" ]; then
+            echo "未設定 VERCEL_DEPLOY_HOOK，略過"
+            exit 0
+          fi
+          curl -fsS -X POST "$DEPLOY_HOOK" > /dev/null
+          echo "已通知 Claude Flow 重新部署"
