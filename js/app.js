@@ -287,6 +287,7 @@ function hashTripId() {
 
 /** 顯示行程並更新來源資訊（分享列、唯讀時隱藏調整行程） */
 function show(t, m) {
+  if (!trip || t.id !== trip.id) flDraft = null; // 換了行程：清掉還沒加入比較表的去回程組合
   meta = m;
   render(t);
   const bar = $("#shareBar"), readOnly = m.source === "cloud" && !m.isOwner;
@@ -535,7 +536,7 @@ ${SCHEMA}`;
 let importMode = "trip";
 function showPrompt(text, title, mode = "trip") {
   importMode = mode;
-  $("label[for=importText]").textContent = mode === "flights" ? "匯入 Claude 回覆的航班選項 JSON" : "匯入 Claude 回覆的 JSON";
+  $("label[for=importText]").textContent = { flights: "匯入 Claude 回覆的航班選項 JSON", airline: "匯入 Claude 回覆的當日航班 JSON（整段回覆貼上即可）" }[mode] || "匯入 Claude 回覆的 JSON";
   $("#promptTitle").textContent = title;
   $("#promptText").value = text;
   $("#promptPanel").hidden = false; $("#planner").hidden = true; $("#savedPanel").hidden = true;
@@ -591,6 +592,7 @@ function extractJson(text) {
 }
 async function importTrip(text) {
   if (importMode === "flights") return importFlights(text);
+  if (importMode === "airline") return importAirline(text);
   const st = $("#importStatus");
   try {
     const t = normalize(extractJson(text));
@@ -644,7 +646,7 @@ function normalizeFlights(f) {
     source: o?.source === "claude" ? "claude" : "manual",
   }));
   const chosenId = options.some(o => o.id === f?.chosenId) ? f.chosenId : null;
-  return { options, chosenId, booked: !!(chosenId && f?.booked) };
+  return { options, chosenId, booked: !!(chosenId && f?.booked), lookup: normalizeLookup(f?.lookup) };
 }
 
 const passengers = t => t.people || parsePeople(t.travelers) || 1;
@@ -727,6 +729,7 @@ function flightsHtml(t) {
       <div class="actions fl-search">${flightSearchLinks(t)}</div>
       <p class="status">網站不直接購票。比較後選定航班，再到航空公司官網或訂票網站購買；票價與班表以購買時為準。</p>
       ${chosenCard}
+      ${lookupHtml(t, edit)}
       ${table}
       ${tools}
       <form class="fl-form" id="flForm" hidden novalidate></form>
@@ -835,6 +838,184 @@ function flightPrompt(t) {
 直接在對話中回覆，不要建立 artifact 或檔案。只回覆一個 \`\`\`json 程式碼區塊，區塊外不要任何其他文字。格式：
 {"options":[{"airline":"航空公司中文名稱","outbound":{"flightNo":"","from":"${t.origin.code}","to":"${t.dest.code}","date":"${t.startDate || ""}","depart":"HH:MM","arrive":"HH:MM","durationMin":0},"inbound":{"flightNo":"","from":"${t.dest.code}","to":"${t.origin.code}","date":"${tripEnd(t) || ""}","depart":"HH:MM","arrive":"HH:MM","durationMin":0},"pricePerPerson":0,"baggage":"","note":""}]}`;
 }
+
+/* ---------- 依航空公司查當日航班 ----------
+ * 一次查一家：網站產生提示詞，使用者貼到 claude.ai（開啟網路搜尋），把回覆的 JSON 匯入。
+ * 結果依航空公司存在 trip.flights.lookup，分成去程（出發日）與回程（回程日）兩欄；
+ * 使用者點「設為去程」「設為回程」組成一組，加入比較表。時刻為網路上查到的參考值。
+ */
+const AIRLINES = ["中華航空", "長榮航空", "星宇航空", "台灣虎航", "立榮航空", "日本航空", "全日空", "樂桃航空", "捷星日本", "酷航",
+  "國泰航空", "香港快運", "大韓航空", "韓亞航空", "濟州航空", "真航空", "德威航空", "釜山航空", "越南航空", "越捷航空",
+  "泰國航空", "泰國獅航", "新加坡航空", "菲律賓航空", "宿霧太平洋航空", "馬來西亞航空", "亞洲航空", "達美航空", "聯合航空"];
+const safeUrl = u => /^https?:\/\/[^\s"'<>]+$/i.test(String(u || "")) ? String(u) : "";
+function normalizeLookup(lk) {
+  const out = {};
+  if (!lk || typeof lk !== "object") return out;
+  const fl = (x, dir) => ({
+    dir, flightNo: String(x?.flightNo || "").trim().toUpperCase().slice(0, 10),
+    depart: /^\d{1,2}:\d{2}$/.test(x?.depart || "") ? x.depart : "", arrive: /^\d{1,2}:\d{2}$/.test(x?.arrive || "") ? x.arrive : "",
+    durationMin: Math.max(0, Math.round(+x?.durationMin || 0)) || null,
+    days: String(x?.days || "").slice(0, 30), note: String(x?.note || "").slice(0, 160), source: safeUrl(x?.source),
+  });
+  for (const [name, v] of Object.entries(lk).slice(0, 30)) {
+    const key = String(name).trim().slice(0, 30); if (!key) continue;
+    out[key] = {
+      fetchedAt: String(v?.fetchedAt || "").slice(0, 10), note: String(v?.note || "").slice(0, 300),
+      outbound: (Array.isArray(v?.outbound) ? v.outbound : []).slice(0, 20).map(x => fl(x, "out")).filter(x => x.flightNo),
+      inbound: (Array.isArray(v?.inbound) ? v.inbound : []).slice(0, 20).map(x => fl(x, "in")).filter(x => x.flightNo),
+    };
+  }
+  return out;
+}
+
+/** 正在組合的一組來回（只在畫面上，不存檔） */
+let flDraft = null;
+const oneWayLink = (from, to, date) => "https://www.google.com/travel/flights?hl=zh-TW&curr=TWD&q=" +
+  encodeURIComponent(`Flights from ${from} to ${to}${date ? " on " + date : ""} one way`);
+
+function lookupHtml(t, edit) {
+  const lk = t.flights.lookup, names = Object.keys(lk);
+  const out = t.startDate, back = tripEnd(t);
+  const flightRow = (name, x) => {
+    const route = x.dir === "out" ? [t.origin.code, t.dest.code, out] : [t.dest.code, t.origin.code, back];
+    const picked = flDraft && flDraft[x.dir] && flDraft[x.dir].flightNo === x.flightNo && flDraft[x.dir].airline === name;
+    return `<li class="lk-flight${picked ? " picked" : ""}">
+      <div class="lk-main"><b>${esc(x.flightNo)}</b> <span class="mono nowrap">${esc(x.depart || "?")}–${esc(x.arrive || "?")}</span>
+        ${x.durationMin ? `<small>${esc(fmtDur(x.durationMin))}</small>` : ""}${x.days ? `<small>・${esc(x.days)}</small>` : ""}
+        ${x.note ? `<div class="lk-note">${esc(x.note)}</div>` : ""}
+        <div class="lk-links">${x.source ? `<a href="${esc(x.source)}" target="_blank" rel="noopener">來源</a>` : `<span class="lk-nosrc">無來源</span>`}
+          <a href="${oneWayLink(...route)}" target="_blank" rel="noopener">查當日票價</a></div></div>
+      ${edit ? `<button class="btn ${picked ? "primary" : ""}" type="button" data-lk="pick" data-air="${esc(name)}" data-dir="${x.dir}" data-no="${esc(x.flightNo)}">${picked ? "已選" : x.dir === "out" ? "設為去程" : "設為回程"}</button>` : ""}
+    </li>`;
+  };
+  const groups = names.map(name => {
+    const v = lk[name];
+    return `<div class="lk-airline">
+      <div class="lk-head"><h4>${esc(name)}</h4><small>查詢日期 ${esc(v.fetchedAt || "—")}</small>
+        ${edit ? `<button class="btn ghost" type="button" data-lk="requery" data-air="${esc(name)}">重新查詢</button><button class="btn ghost" type="button" data-lk="remove" data-air="${esc(name)}">移除</button>` : ""}</div>
+      ${v.note ? `<p class="lk-note">${esc(v.note)}</p>` : ""}
+      <div class="lk-cols">
+        <div><h5>去程・${esc(fmtDate(out) || "出發日")} ${esc(t.origin.code)}→${esc(t.dest.code)}</h5>
+          ${v.outbound.length ? `<ul class="lk-list">${v.outbound.map(x => flightRow(name, x)).join("")}</ul>` : `<p class="status">查不到直飛航班</p>`}</div>
+        <div><h5>回程・${esc(fmtDate(back) || "回程日")} ${esc(t.dest.code)}→${esc(t.origin.code)}</h5>
+          ${v.inbound.length ? `<ul class="lk-list">${v.inbound.map(x => flightRow(name, x)).join("")}</ul>` : `<p class="status">查不到直飛航班</p>`}</div>
+      </div></div>`;
+  }).join("");
+
+  const legStr = (d, label) => d ? `${label} <b>${esc(d.airline)} ${esc(d.flightNo)}</b> <span class="mono">${esc(d.depart || "?")}–${esc(d.arrive || "?")}</span>` : `${label} <span class="lk-wait">尚未選擇</span>`;
+  const draftBar = edit && flDraft && (flDraft.out || flDraft.in) ? `
+    <div class="lk-draft" role="status">
+      <span>${legStr(flDraft.out, "去程")}　${legStr(flDraft.in, "回程")}</span>
+      <span class="lk-draft-acts"><button class="btn primary" type="button" data-lk="commit">加入比較表</button><button class="btn ghost" type="button" data-lk="clear">清除</button></span>
+    </div>` : "";
+
+  const picker = edit ? `
+    <div class="lk-picker">
+      <label for="lkAirline">航空公司</label>
+      <input id="lkAirline" list="lkAirlines" placeholder="例：中華航空" autocomplete="off">
+      <datalist id="lkAirlines">${AIRLINES.map(a => `<option value="${esc(a)}"></option>`).join("")}</datalist>
+      <button class="btn primary" type="button" data-lk="query">查這家的當日航班</button>
+    </div>
+    <p class="status">會產生一段提示詞，請貼到 claude.ai 並開啟「網路搜尋」，再把回覆貼回來。一次查一家，結果會累積在下方。</p>` : "";
+
+  if (!edit && !names.length) return "";
+  return `<div class="lk-block">
+    <h3>依航空公司查當日航班</h3>
+    ${picker}${draftBar}${groups}
+    ${names.length ? `<p class="status">時刻是從航空公司或航班動態網站查到的參考值，幾個月後的班表可能還沒正式公布，購票前請以航空公司官網為準。</p>` : ""}
+  </div>`;
+}
+
+function airlinePrompt(t, airline) {
+  return `請使用網路搜尋，查詢「${airline}」在以下兩個日期的直飛定期航班，讓我挑選要搭哪一班：
+
+- 去程：${t.startDate || "（日期未定，請列出一般班表）"}，${t.origin.city || ""}（${t.origin.code}）→ ${t.dest.city || ""}（${t.dest.code}）
+- 回程：${tripEnd(t) || "（日期未定，請列出一般班表）"}，${t.dest.city || ""}（${t.dest.code}）→ ${t.origin.city || ""}（${t.origin.code}）
+
+規則：
+1. 只列「${airline}」自己執飛的直飛班次；不要列其他航空公司執飛的共用班號，也不要列轉機航班。
+2. 優先查航空公司官網時刻表、機場航班時刻表，其次是 Trip.com、FlightConnections、Airportia 等航班動態或航線頁面。
+3. 若這兩天的正式班表還沒公布，用最接近日期的班表推估，並在 note 寫明依據哪一天或哪個航季的資料。
+4. 每一班都附上 source：你實際查到這班資訊的網頁網址。查不到來源的班次不要列。
+5. 時間一律是當地時間（HH:MM）；durationMin 是飛行分鐘數；days 寫每週飛哪幾天（例如「每天」「週一、三、五」），不確定就留空。
+6. 查不到這家航空在此航線有直飛航班時，outbound、inbound 回傳空陣列，在 note 說明。不要編造班號或時刻。
+
+直接在對話中回覆，不要建立 artifact 或檔案。最後只回覆一個 \`\`\`json 程式碼區塊，格式：
+{"airline":"${airline}","outbound":[{"flightNo":"","depart":"HH:MM","arrive":"HH:MM","durationMin":0,"days":"","note":"","source":"https://..."}],"inbound":[{"flightNo":"","depart":"HH:MM","arrive":"HH:MM","durationMin":0,"days":"","note":"","source":"https://..."}],"note":""}`;
+}
+
+let lookupAirline = "";
+async function importAirline(text) {
+  const st = $("#importStatus");
+  try {
+    const raw = String(text || "").trim();
+    const fences = [...raw.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+    const body = (fences.length ? fences[fences.length - 1][1] : raw).trim();  // 網路搜尋的回覆前面常有說明，取最後一個區塊
+    let data;
+    try { data = JSON.parse(body); } catch { data = extractJson(body); }
+    if (!data || (!Array.isArray(data.outbound) && !Array.isArray(data.inbound))) throw new Error("找不到 outbound／inbound 航班清單");
+    const name = String(lookupAirline || data.airline || "").trim() || "未命名航空";
+    const entry = normalizeLookup({ [name]: { ...data, fetchedAt: new Date().toISOString().slice(0, 10) } })[name];
+    trip.flights = { ...trip.flights, lookup: { ...trip.flights.lookup, [name]: entry } };
+    $("#promptPanel").hidden = true;
+    const n = entry.outbound.length + entry.inbound.length;
+    if (await persistFlights(n ? `已加入${name}的 ${n} 個航班` : `${name}在這條航線查不到直飛航班`)) document.querySelector(".lk-block")?.scrollIntoView({ block: "start" });
+  } catch (err) {
+    st.className = "status err";
+    st.textContent = err instanceof SyntaxError
+      ? "JSON 格式有誤，常見原因是回覆被截斷。請請 Claude「繼續」或重新產生，再貼一次完整內容。"
+      : "無法匯入：" + err.message + "。請確認貼上的是 Claude 回覆中的 JSON。";
+  }
+}
+
+/** 把組好的去回程加入比較表 */
+function draftToOption(t, d) {
+  const leg = (x, from, to, date) => x ? { flightNo: x.flightNo, from, to, date, depart: x.depart, arrive: x.arrive, durationMin: x.durationMin } : {};
+  const names = [...new Set([d.out?.airline, d.in?.airline].filter(Boolean))];
+  const notes = [d.out?.note, d.in?.note].filter(Boolean).join("；");
+  return normalizeFlights({ options: [{
+    id: `f-${Date.now().toString(36)}`, airline: names.join("／"), source: "claude",
+    outbound: leg(d.out, t.origin.code, t.dest.code, t.startDate), inbound: leg(d.in, t.dest.code, t.origin.code, tripEnd(t)),
+    note: ["票價請按「查當日票價」後自行填入", notes].filter(Boolean).join("；"),
+  }] }).options[0];
+}
+
+$("#book").addEventListener("click", async e => {
+  const b = e.target.closest("[data-lk]"); if (!b || !trip) return;
+  const act = b.dataset.lk, name = b.dataset.air;
+  if (act === "query" || act === "requery") {
+    const airline = act === "query" ? ($("#lkAirline").value || "").trim() : name;
+    if (!airline) { $("#lkAirline").focus(); toast("請先輸入或選擇航空公司"); return; }
+    lookupAirline = airline;
+    return showPrompt(airlinePrompt(trip, airline), `查詢${airline}的當日航班`, "airline");
+  }
+  if (!flightEditable()) return;
+  if (act === "pick") {
+    const v = trip.flights.lookup[name]; if (!v) return;
+    const x = (b.dataset.dir === "out" ? v.outbound : v.inbound).find(f => f.flightNo === b.dataset.no); if (!x) return;
+    flDraft = { ...(flDraft || {}), [b.dataset.dir]: { ...x, airline: name } };
+    show(trip, meta);
+    document.querySelector(".lk-draft")?.scrollIntoView({ block: "nearest" });
+    if (flDraft.out && flDraft.in) toast("去程、回程都選好了，按「加入比較表」");
+    return;
+  }
+  if (act === "clear") { flDraft = null; return show(trip, meta); }
+  if (act === "commit") {
+    if (!flDraft) return;
+    const opt = draftToOption(trip, flDraft);
+    trip.flights = { ...trip.flights, options: [...trip.flights.options, opt] };
+    flDraft = null;
+    if (await persistFlights("已加入比較表，票價可按「編輯」填入")) document.querySelector(".fl-table")?.scrollIntoView({ block: "center" });
+    return;
+  }
+  if (act === "remove") {
+    if (b.dataset.confirm !== "1") { b.dataset.confirm = "1"; b.textContent = "確認移除"; return; }
+    const lookup = { ...trip.flights.lookup }; delete lookup[name];
+    if (flDraft) for (const k of ["out", "in"]) if (flDraft[k]?.airline === name) delete flDraft[k];
+    trip.flights = { ...trip.flights, lookup };
+    return persistFlights(`已移除${name}的查詢結果`);
+  }
+});
 
 async function importFlights(text) {
   const st = $("#importStatus");

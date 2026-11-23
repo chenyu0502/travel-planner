@@ -254,6 +254,33 @@ footer{margin:40px 0 30px;color:var(--muted);font-size:12.5px}
 .fl-leg legend{font-weight:700;font-size:13px;padding:0 4px}
 .fl-form .field input{border:1px solid var(--line);background:var(--paper);border-radius:var(--r-sm);padding:7px 9px;width:100%}
 
+/* 依航空公司查當日航班 */
+.lk-block{margin:16px 0;padding-top:14px;border-top:1px solid var(--line)}
+.lk-block h3{font-size:15px;margin:0 0 8px}
+.lk-picker{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.lk-picker label{font-weight:700;font-size:13px}
+.lk-picker input{border:1px solid var(--line);background:var(--paper);border-radius:var(--r-sm);padding:7px 10px;min-width:0;flex:0 1 220px}
+.lk-draft{position:sticky;top:calc(env(safe-area-inset-top,0px) + 112px);z-index:5;margin:10px 0;padding:10px 12px;border:1px solid var(--accent);background:var(--card);border-radius:var(--r);display:flex;gap:8px 14px;align-items:center;justify-content:space-between;flex-wrap:wrap;box-shadow:0 4px 14px color-mix(in srgb,var(--ink) 10%,transparent)}
+.lk-draft-acts{display:flex;gap:6px}
+@media (max-width:1023px){.lk-draft{position:static}}  /* 窄螢幕頂列較高，固定會被遮住 */
+.lk-wait{color:var(--muted)}
+.lk-airline{margin-top:14px;border:1px solid var(--line);border-radius:var(--r);padding:10px 12px}
+.lk-head{display:flex;align-items:baseline;gap:4px 10px;flex-wrap:wrap}
+.lk-head h4{margin:0;font-size:15px}
+.lk-head small{color:var(--muted);margin-right:auto}
+.lk-head .btn{padding:3px 9px;font-size:13px}
+.lk-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-top:8px}
+.lk-cols h5{margin:0 0 6px;font-size:13px;color:var(--muted)}
+.lk-list{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.lk-flight{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;padding:8px 10px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--paper)}
+.lk-flight.picked{border-color:var(--accent);background:var(--accent-soft)}
+.lk-main{min-width:0;font-size:14px}
+.lk-main small{color:var(--muted);margin-left:4px}
+.lk-note{font-size:12.5px;color:var(--muted);margin:2px 0 0}
+.lk-links{display:flex;gap:12px;font-size:12.5px;margin-top:3px}
+.lk-nosrc{color:var(--warn)}
+.lk-flight .btn{padding:4px 10px;font-size:13px;flex-shrink:0}
+
 /* 分享列與我的行程 */
 .sharebar{margin-top:18px;background:var(--accent-soft);border:1px solid var(--accent);border-radius:var(--r);padding:12px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 .sharebar p{margin:0;flex:1 1 280px}
@@ -272,7 +299,7 @@ label.btn{user-select:none}
 /* 列印：只留手冊本體 */
 @media print{
   :root{--paper:#fff;--card:#fff}
-  body::before,.top,.banner,.planner,#refine,footer,.daytabs,.toast,.fl-tools,.fl-search,.fl-acts,.fl-chosen-actions,.fl-pnr,.fl-form{display:none!important}
+  body::before,.top,.banner,.planner,#refine,footer,.daytabs,.toast,.fl-tools,.fl-search,.fl-acts,.fl-chosen-actions,.fl-pnr,.fl-form,.lk-picker,.lk-draft,.lk-flight .btn,.lk-head .btn{display:none!important}
   body{font-size:12px}
   .wrap{max-width:none;padding:0}
   section.block{margin-top:18px}
