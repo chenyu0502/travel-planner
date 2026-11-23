@@ -873,8 +873,51 @@ let flDraft = null;
 const oneWayLink = (from, to, date) => "https://www.google.com/travel/flights?hl=zh-TW&curr=TWD&q=" +
   encodeURIComponent(`Flights from ${from} to ${to}${date ? " on " + date : ""} one way`);
 
+/* ---------- Claude Code 查好的航線班表（js/flight-data.js） ---------- */
+const WEEKDAY_NAMES = ["", "一", "二", "三", "四", "五", "六", "日"];
+const isoWeekday = d => { const x = new Date(d + "T00:00:00").getDay(); return x === 0 ? 7 : x; };
+function daysText(days) {
+  if (!Array.isArray(days) || !days.length) return "";
+  if (days.length === 7) return "每天";
+  return "週" + days.slice().sort().map(n => WEEKDAY_NAMES[n] || "").join("、");
+}
+/** 依航線與日期挑出當天有飛的航班；日期未定時列出全部 */
+function publishedFlights(from, to, date) {
+  const r = window.RB_FLIGHT_DATA?.routes?.[`${from}-${to}`];
+  if (!r || !Array.isArray(r.flights)) return null;
+  const wd = date ? isoWeekday(date) : 0;
+  const flights = r.flights.filter(f => !date || (
+    (!Array.isArray(f.days) || !f.days.length || f.days.includes(wd)) &&
+    (!f.validFrom || f.validFrom <= date) && (!f.validTo || date <= f.validTo)));
+  return { route: r, flights };
+}
+/** 把查好的班表整理成與 trip.flights.lookup 相同的格式（依航空公司分組），標記 published */
+function publishedLookup(t) {
+  const out = publishedFlights(t.origin.code, t.dest.code, t.startDate);
+  const back = publishedFlights(t.dest.code, t.origin.code, tripEnd(t));
+  if (!out && !back) return {};
+  const groups = {};
+  const add = (res, dir) => (res?.flights || []).forEach(f => {
+    const name = String(f.airline || "").trim() || "未命名航空";
+    const g = groups[name] ||= { published: true, fetchedAt: "", note: "", outbound: [], inbound: [] };
+    g.fetchedAt = [g.fetchedAt, res.route.checkedAt].filter(Boolean).sort().pop() || "";
+    const leg = normalizeLookup({ x: { [dir === "out" ? "outbound" : "inbound"]: [{ ...f, days: daysText(f.days) }] } }).x;
+    g[dir === "out" ? "outbound" : "inbound"].push(...(dir === "out" ? leg.outbound : leg.inbound));
+  });
+  add(out, "out"); add(back, "in");
+  const notes = [out?.route.note, back?.route.note].filter(Boolean);
+  for (const g of Object.values(groups)) {
+    g.note = [...new Set(notes)].join("；");
+    for (const k of ["outbound", "inbound"]) g[k].sort((a, b) => (a.depart || "").localeCompare(b.depart || ""));
+  }
+  return groups;
+}
+/** 畫面上的查詢結果：Claude Code 查好的班表＋使用者自己匯入的（同一家航空以自己匯入的為準） */
+const mergedLookup = t => ({ ...publishedLookup(t), ...t.flights.lookup });
+
 function lookupHtml(t, edit) {
-  const lk = t.flights.lookup, names = Object.keys(lk);
+  const lk = mergedLookup(t), names = Object.keys(lk);
+  const hasPublished = names.some(n => lk[n].published);
   const out = t.startDate, back = tripEnd(t);
   const flightRow = (name, x) => {
     const route = x.dir === "out" ? [t.origin.code, t.dest.code, out] : [t.dest.code, t.origin.code, back];
@@ -891,8 +934,10 @@ function lookupHtml(t, edit) {
   const groups = names.map(name => {
     const v = lk[name];
     return `<div class="lk-airline">
-      <div class="lk-head"><h4>${esc(name)}</h4><small>查詢日期 ${esc(v.fetchedAt || "—")}</small>
-        ${edit ? `<button class="btn ghost" type="button" data-lk="requery" data-air="${esc(name)}">重新查詢</button><button class="btn ghost" type="button" data-lk="remove" data-air="${esc(name)}">移除</button>` : ""}</div>
+      <div class="lk-head"><h4>${esc(name)}</h4>
+        ${v.published ? `<span class="lk-pub">Claude Code 已查好</span><small>查詢日期 ${esc(v.fetchedAt || "—")}</small>`
+          : `<small>查詢日期 ${esc(v.fetchedAt || "—")}</small>`}
+        ${edit && !v.published ? `<button class="btn ghost" type="button" data-lk="requery" data-air="${esc(name)}">重新查詢</button><button class="btn ghost" type="button" data-lk="remove" data-air="${esc(name)}">移除</button>` : ""}</div>
       ${v.note ? `<p class="lk-note">${esc(v.note)}</p>` : ""}
       <div class="lk-cols">
         <div><h5>去程・${esc(fmtDate(out) || "出發日")} ${esc(t.origin.code)}→${esc(t.dest.code)}</h5>
@@ -916,7 +961,7 @@ function lookupHtml(t, edit) {
       <datalist id="lkAirlines">${AIRLINES.map(a => `<option value="${esc(a)}"></option>`).join("")}</datalist>
       <button class="btn primary" type="button" data-lk="query">查這家的當日航班</button>
     </div>
-    <p class="status">會產生一段提示詞，請貼到 claude.ai 並開啟「網路搜尋」，再把回覆貼回來。一次查一家，結果會累積在下方。</p>` : "";
+    <p class="status">${hasPublished ? "下方標示「Claude Code 已查好」的航班不需要再查。要查其他航空公司，可以在 Claude Code 對話中請它加入，或" : ""}按上方按鈕產生提示詞，貼到 claude.ai 並開啟「網路搜尋」，再把回覆貼回來。</p>` : "";
 
   if (!edit && !names.length) return "";
   return `<div class="lk-block">
@@ -991,7 +1036,7 @@ $("#book").addEventListener("click", async e => {
   }
   if (!flightEditable()) return;
   if (act === "pick") {
-    const v = trip.flights.lookup[name]; if (!v) return;
+    const v = mergedLookup(trip)[name]; if (!v) return;
     const x = (b.dataset.dir === "out" ? v.outbound : v.inbound).find(f => f.flightNo === b.dataset.no); if (!x) return;
     flDraft = { ...(flDraft || {}), [b.dataset.dir]: { ...x, airline: name } };
     show(trip, meta);

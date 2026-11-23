@@ -268,6 +268,7 @@ footer{margin:40px 0 30px;color:var(--muted);font-size:12.5px}
 .lk-head{display:flex;align-items:baseline;gap:4px 10px;flex-wrap:wrap}
 .lk-head h4{margin:0;font-size:15px}
 .lk-head small{color:var(--muted);margin-right:auto}
+.lk-pub{font-size:12px;font-weight:700;color:var(--accent-ink);background:var(--accent);border-radius:999px;padding:1px 9px}
 .lk-head .btn{padding:3px 9px;font-size:13px}
 .lk-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-top:8px}
 .lk-cols h5{margin:0 0 6px;font-size:13px;color:var(--muted)}
