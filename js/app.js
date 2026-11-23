@@ -60,6 +60,7 @@ function normalize(d) {
     isSample: !!d.isSample, request: d.request || null
   };
   out.overview.passes = arr(out.overview.passes);
+  out.flights = normalizeFlights(d.flights);
   if (!out.dayPlans.length) throw new Error("沒有每日行程");
   return out;
 }
@@ -172,7 +173,7 @@ function render(t) {
       <p class="status" style="margin:10px 0 0">電話號碼可長按或點兩下選取複製。建議另外抄寫一份放在錢包。</p></div>
   </section>`;
 
-  $("#book").innerHTML = pass + overview +
+  $("#book").innerHTML = pass + overview + flightsHtml(t) +
     `<section class="block" id="days"><h2>每日行程 <span class="eyebrow">Daily route</span></h2><nav class="daytabs" aria-label="跳到某一天">${tabs}</nav>${days}</section>` +
     budget + bookings + checklist + notes + emergency;
   updateProgress();
@@ -531,7 +532,10 @@ ${SCHEMA}`;
 }
 
 /* ---------- 提示詞面板：複製到 claude.ai，再把 JSON 貼回來 ---------- */
-function showPrompt(text, title) {
+let importMode = "trip";
+function showPrompt(text, title, mode = "trip") {
+  importMode = mode;
+  $("label[for=importText]").textContent = mode === "flights" ? "匯入 Claude 回覆的航班選項 JSON" : "匯入 Claude 回覆的 JSON";
   $("#promptTitle").textContent = title;
   $("#promptText").value = text;
   $("#promptPanel").hidden = false; $("#planner").hidden = true; $("#savedPanel").hidden = true;
@@ -586,6 +590,7 @@ function extractJson(text) {
   return JSON.parse(body.slice(a, b + 1));
 }
 async function importTrip(text) {
+  if (importMode === "flights") return importFlights(text);
   const st = $("#importStatus");
   try {
     const t = normalize(extractJson(text));
@@ -593,6 +598,8 @@ async function importTrip(text) {
     // 調整行程：沿用原本的行程（本機用同一個 ID；雲端在 saveTrip 依 meta 更新同一份）
     const refining = !!pendingBase && !pendingBase.isSample;
     if (refining) t.id = pendingBase.id;
+    // Claude 的調整結果不一定帶回機票比較資料，沿用原本的
+    if (refining && !t.flights.options.length && pendingBase.flights) t.flights = pendingBase.flights;
     const targetId = refining && pendingMeta && pendingMeta.source === "cloud" && pendingMeta.isOwner ? pendingMeta.id : undefined;
     if (pendingRequest) { t.request = pendingRequest; if (!t.people) t.people = (pendingRequest.adults + pendingRequest.seniors + pendingRequest.kids) || null; }
     pendingBase = null; pendingMeta = null; pendingRequest = null;
@@ -612,6 +619,293 @@ $("#importFile").addEventListener("change", e => {
   const file = e.target.files[0]; if (!file) return;
   const r = new FileReader(); r.onload = () => importTrip(r.result); r.readAsText(file, "utf-8");
   e.target.value = "";
+});
+
+/* ---------- 機票：搜尋、比較、選擇航班 ----------
+ * 網站不直接購票（需要付費的訂位 API）。這裡負責：帶入條件到 Google Flights／Skyscanner 搜尋、
+ * 請 Claude 列出候選航班、自行新增與比較、選定後寫回行程（第一天與最後一天的航班、預算的機票）。
+ * 訂位代號只存在這台電腦（localStorage），不會跟著行程分享出去。
+ */
+function normalizeFlights(f) {
+  const arr = v => Array.isArray(v) ? v : [];
+  const leg = l => ({
+    flightNo: String(l?.flightNo || "").trim(), from: String(l?.from || "").trim().toUpperCase().slice(0, 4),
+    to: String(l?.to || "").trim().toUpperCase().slice(0, 4), date: /^\d{4}-\d{2}-\d{2}$/.test(l?.date || "") ? l.date : "",
+    depart: /^\d{1,2}:\d{2}$/.test(l?.depart || "") ? l.depart : "", arrive: /^\d{1,2}:\d{2}$/.test(l?.arrive || "") ? l.arrive : "",
+    durationMin: Math.max(0, Math.round(+l?.durationMin || 0)) || null,
+  });
+  const options = arr(f?.options).map((o, i) => ({
+    id: String(o?.id || `f-${Date.now().toString(36)}-${i}`),
+    airline: String(o?.airline || "未命名航空").slice(0, 40),
+    outbound: leg(o?.outbound), inbound: leg(o?.inbound),
+    priceTotal: Math.max(0, Math.round(+o?.priceTotal || 0)) || null,
+    pricePerPerson: Math.max(0, Math.round(+o?.pricePerPerson || 0)) || null,
+    baggage: String(o?.baggage || "").slice(0, 80), note: String(o?.note || "").slice(0, 200),
+    source: o?.source === "claude" ? "claude" : "manual",
+  }));
+  const chosenId = options.some(o => o.id === f?.chosenId) ? f.chosenId : null;
+  return { options, chosenId, booked: !!(chosenId && f?.booked) };
+}
+
+const passengers = t => t.people || parsePeople(t.travelers) || 1;
+const optTotal = (t, o) => o.priceTotal || (o.pricePerPerson ? o.pricePerPerson * passengers(t) : null);
+const optPer = (t, o) => o.pricePerPerson || (o.priceTotal ? Math.round(o.priceTotal / passengers(t)) : null);
+const tripEnd = t => t.startDate ? addDays(t.startDate, t.days - 1) : "";
+const fmtDur = m => m ? `${Math.floor(m / 60)} 小時${m % 60 ? ` ${m % 60} 分` : ""}` : "";
+/** 單程航班的顯示文字；inline 時飛行時間接在同一行（已選航班卡片），否則換行（比較表） */
+function legText(l, inline = false) {
+  if (!l.flightNo && !l.depart) return "—";
+  const route = l.from && l.to ? `${l.from}→${l.to} ` : "";
+  const dur = l.durationMin ? (inline ? ` <small>（${esc(fmtDur(l.durationMin))}）</small>` : `<br><small>${esc(fmtDur(l.durationMin))}</small>`) : "";
+  return `${l.flightNo ? `<b>${esc(l.flightNo)}</b> ` : ""}${esc(route)}<span class="mono nowrap">${esc(l.depart || "?")}–${esc(l.arrive || "?")}</span>${dur}`;
+}
+function flightEditable() { return meta.source === "local" || (meta.source === "cloud" && meta.isOwner); }
+
+/** Google Flights、Skyscanner 搜尋連結（帶入出發地、目的地、日期與人數） */
+function flightSearchLinks(t) {
+  const from = t.origin.code, to = t.dest.code, out = t.startDate, back = tripEnd(t);
+  if (!/^[A-Z]{3}$/.test(from) || !/^[A-Z]{3}$/.test(to)) return "";
+  const q = `Flights from ${from} to ${to}${out ? ` on ${out}` : ""}${back ? ` returning ${back}` : ""}`;
+  const g = "https://www.google.com/travel/flights?hl=zh-TW&curr=TWD&q=" + encodeURIComponent(q);
+  const r = t.request || {};
+  const adults = (r.adults || 0) + (r.seniors || 0) || passengers(t);
+  const yymmdd = d => d.replace(/-/g, "").slice(2);
+  const sky = "https://www.skyscanner.com.tw/transport/flights/" + from.toLowerCase() + "/" + to.toLowerCase() + "/" +
+    (out ? yymmdd(out) + "/" + (back ? yymmdd(back) + "/" : "") : "") + `?adultsv2=${adults}` + (r.kids ? `&childrenv2=${Array(r.kids).fill(8).join("|")}` : "") + "&cabinclass=economy";
+  return `<a class="btn" href="${g}" target="_blank" rel="noopener">在 Google Flights 搜尋</a>
+    <a class="btn" href="${sky}" target="_blank" rel="noopener">在 Skyscanner 搜尋</a>`;
+}
+
+function flightsHtml(t) {
+  const f = t.flights, edit = flightEditable();
+  const chosen = f.options.find(o => o.id === f.chosenId);
+  const pnr = edit && chosen ? store.get("rb.pnr." + t.id, "") : "";
+  const route = `${esc(t.origin.city || t.origin.code)}（${esc(t.origin.code)}）→ ${esc(t.dest.city || t.dest.code)}（${esc(t.dest.code)}）`;
+  const dates = t.startDate ? `${esc(fmtDate(t.startDate))} 去、${esc(fmtDate(tripEnd(t)))} 回` : "日期未定";
+
+  const chosenCard = chosen ? `
+    <div class="fl-chosen">
+      <div><span class="eyebrow">已選航班</span>
+        <p class="fl-chosen-title"><b>${esc(chosen.airline)}</b><br>去程 ${legText(chosen.outbound, true)}<br>回程 ${legText(chosen.inbound, true)}</p>
+        <p class="status">${optTotal(t, chosen) ? `總價約 NT$ ${num(optTotal(t, chosen))}（${passengers(t)} 人）` : "票價未填"}${chosen.baggage ? `・${esc(chosen.baggage)}` : ""}
+          ・<span class="fl-state ${f.booked ? "ok" : ""}">${f.booked ? "已訂位" : "尚未訂位"}</span></p>
+      </div>
+      ${edit ? `<div class="fl-chosen-actions">
+        <button class="btn" type="button" data-fl="booked">${f.booked ? "改為尚未訂位" : "標示為已訂位"}</button>
+        <button class="btn" type="button" data-fl="adjust">依這個航班調整行程</button>
+      </div>
+      ${f.booked ? `<div class="fl-pnr"><label for="flPnr">訂位代號（只存在這台電腦，不會分享出去）</label>
+        <div class="fl-pnr-row"><input id="flPnr" maxlength="12" autocomplete="off" value="${esc(pnr)}" placeholder="例：ABC123"><button class="btn" type="button" data-fl="pnr">儲存</button></div></div>` : ""}` : ""}
+    </div>` : "";
+
+  const rows = f.options.map(o => `
+    <tr class="${o.id === f.chosenId ? "fl-row-chosen" : ""}">
+      <td><b>${esc(o.airline)}</b>${o.source === "claude" ? `<br><small class="fl-src">Claude 建議・請核對</small>` : ""}</td>
+      <td>${legText(o.outbound)}</td><td>${legText(o.inbound)}</td>
+      <td class="num">${optTotal(t, o) ? num(optTotal(t, o)) : "—"}</td><td class="num">${optPer(t, o) ? num(optPer(t, o)) : "—"}</td>
+      <td>${esc(o.baggage || "—")}</td><td class="fl-note">${esc(o.note || "")}</td>
+      ${edit ? `<td class="fl-acts">${o.id === f.chosenId ? `<span class="badge-chosen">已選</span>` : `<button class="btn primary" type="button" data-fl="choose" data-id="${esc(o.id)}">選這班</button>`}
+        <button class="btn ghost" type="button" data-fl="edit" data-id="${esc(o.id)}">編輯</button>
+        <button class="btn ghost" type="button" data-fl="del" data-id="${esc(o.id)}">刪除</button></td>` : (o.id === f.chosenId ? `<td><span class="badge-chosen">已選</span></td>` : "<td></td>")}
+    </tr>`).join("");
+
+  const table = f.options.length ? `<div class="tablebox"><table class="fl-table">
+      <thead><tr><th>航空公司</th><th>去程</th><th>回程</th><th class="num">總價 NT$</th><th class="num">每人</th><th>行李</th><th>備註</th><th></th></tr></thead>
+      <tbody>${rows}</tbody></table></div>`
+    : `<p class="status">還沒有候選航班。${edit ? "可以請 Claude 列出選項，或自己新增。" : ""}</p>`;
+
+  const tools = edit ? `<div class="actions fl-tools">
+      <button class="btn primary" type="button" data-fl="prompt">請 Claude 列出航班選項</button>
+      <button class="btn" type="button" data-fl="add">自己新增航班</button>
+    </div>` : (meta.source === "sample" ? `<p class="status">範例行程不能修改。建立或匯入自己的行程後，就能比較與選擇航班。</p>` : "");
+
+  return `
+  <section class="block" id="flights">
+    <h2>機票 <span class="eyebrow">Flights</span></h2>
+    <div class="panel">
+      <p class="fl-route">${route}・${dates}・${passengers(t)} 人</p>
+      <div class="actions fl-search">${flightSearchLinks(t)}</div>
+      <p class="status">網站不直接購票。比較後選定航班，再到航空公司官網或訂票網站購買；票價與班表以購買時為準。</p>
+      ${chosenCard}
+      ${table}
+      ${tools}
+      <form class="fl-form" id="flForm" hidden novalidate></form>
+    </div>
+  </section>`;
+}
+
+/** 新增或編輯航班的表單 */
+function openFlightForm(o) {
+  const t = trip, out = o?.outbound || {}, inb = o?.inbound || {};
+  const legFields = (k, l, label, defFrom, defTo, defDate) => `
+    <fieldset class="fl-leg"><legend>${label}</legend>
+      <div class="field"><label for="fe-${k}-no">航班號碼</label><input id="fe-${k}-no" value="${esc(l.flightNo || "")}" placeholder="例：JX800"></div>
+      <div class="field"><label for="fe-${k}-from">出發</label><input id="fe-${k}-from" value="${esc(l.from || defFrom)}" maxlength="4"></div>
+      <div class="field"><label for="fe-${k}-to">抵達</label><input id="fe-${k}-to" value="${esc(l.to || defTo)}" maxlength="4"></div>
+      <div class="field"><label for="fe-${k}-date">日期</label><input id="fe-${k}-date" type="date" value="${esc(l.date || defDate)}"></div>
+      <div class="field"><label for="fe-${k}-dep">起飛（當地）</label><input id="fe-${k}-dep" type="time" value="${esc(l.depart || "")}"></div>
+      <div class="field"><label for="fe-${k}-arr">抵達（當地）</label><input id="fe-${k}-arr" type="time" value="${esc(l.arrive || "")}"></div>
+      <div class="field"><label for="fe-${k}-dur">飛行分鐘</label><input id="fe-${k}-dur" type="number" min="0" value="${esc(l.durationMin || "")}"></div>
+    </fieldset>`;
+  const form = $("#flForm");
+  form.dataset.id = o ? o.id : "";
+  form.innerHTML = `
+    <h3>${o ? "編輯航班" : "新增航班"}</h3>
+    <div class="field"><label for="fe-airline">航空公司 *</label><input id="fe-airline" value="${esc(o?.airline || "")}" placeholder="例：星宇航空"></div>
+    ${legFields("out", out, "去程", t.origin.code, t.dest.code, t.startDate)}
+    ${legFields("in", inb, "回程", t.dest.code, t.origin.code, tripEnd(t))}
+    <div class="grid">
+      <div class="field"><label for="fe-total">總價（全部旅客，NT$）</label><input id="fe-total" type="number" min="0" step="100" value="${esc(o?.priceTotal || "")}"></div>
+      <div class="field"><label for="fe-per">或每人價格（NT$）</label><input id="fe-per" type="number" min="0" step="100" value="${esc(o?.pricePerPerson || "")}"><small>只填每人時，總價以 ${passengers(t)} 人計算</small></div>
+      <div class="field"><label for="fe-bag">行李</label><input id="fe-bag" value="${esc(o?.baggage || "")}" placeholder="例：託運 23 公斤"></div>
+      <div class="field"><label for="fe-note">備註</label><input id="fe-note" value="${esc(o?.note || "")}" placeholder="例：含餐、需另購座位"></div>
+    </div>
+    <div class="actions"><button class="btn primary" type="submit">儲存航班</button><button class="btn ghost" type="button" data-fl="cancel">取消</button><span class="status" id="flFormStatus"></span></div>`;
+  form.hidden = false;
+  form.scrollIntoView({ block: "center" });
+  $("#fe-airline").focus({ preventScroll: true });
+}
+
+async function persistFlights(msg) {
+  if (await saveTrip(trip)) { if (msg) toast(msg); return true; }
+  return false;
+}
+
+/** 把選定的航班寫回行程：第一天與最後一天的航班項目、預算的機票 */
+function applyFlightToPlan(t, o) {
+  const legItem = (l, dir) => ({
+    time: l.depart || "", type: "move", flight: dir,
+    title: `${l.from || "?"} → ${l.to || "?"}`,
+    mode: `${o.airline}${l.flightNo ? " " + l.flightNo : ""}`,
+    minutes: l.durationMin || undefined,
+    detail: [l.arrive && `當地時間 ${l.arrive} 抵達`, o.baggage].filter(Boolean).join("；"),
+  });
+  const isFlight = it => it.flight || (it.type === "move" && /航空|航班|機場|空港|✈|\b[A-Z0-9]{2}\s?\d{2,4}\b/.test(`${it.title} ${it.mode || ""}`));
+  const first = t.dayPlans[0], last = t.dayPlans[t.dayPlans.length - 1];
+  if (first && (o.outbound.flightNo || o.outbound.depart)) {
+    const i = first.items.findIndex(it => it.flight === "outbound");
+    const j = i >= 0 ? i : (first.items[0] && isFlight(first.items[0]) ? 0 : -1);
+    if (j >= 0) first.items[j] = legItem(o.outbound, "outbound"); else first.items.unshift(legItem(o.outbound, "outbound"));
+  }
+  if (last && last !== first && (o.inbound.flightNo || o.inbound.depart)) {
+    const i = last.items.findIndex(it => it.flight === "inbound");
+    const k = last.items.length - 1;
+    const j = i >= 0 ? i : (last.items[k] && isFlight(last.items[k]) ? k : -1);
+    if (j >= 0) last.items[j] = legItem(o.inbound, "inbound"); else last.items.push(legItem(o.inbound, "inbound"));
+  }
+  // 依時間重新排列當天項目（新加入的航班不一定在最前或最後）；沒有時間的項目跟著前一項
+  const byTime = items => {
+    let lastKey = "";
+    return items.map((it, i) => {
+      const m = /^(\d{1,2}):(\d{2})$/.exec(it.time || "");
+      if (m) lastKey = m[1].padStart(2, "0") + m[2];
+      return { it, key: lastKey, i };
+    }).sort((a, b) => a.key.localeCompare(b.key) || a.i - b.i).map(x => x.it);
+  };
+  if (first) first.items = byTime(first.items);
+  if (last && last !== first) last.items = byTime(last.items);
+  const total = optTotal(t, o);
+  if (total) {
+    const note = `${o.airline} ${[o.outbound.flightNo, o.inbound.flightNo].filter(Boolean).join("／")}`.trim();
+    const b = t.budget.items.find(x => /機票|航空|機位/.test(x.category));
+    if (b) { b.amount = total; b.note = note; } else t.budget.items.unshift({ category: "機票", amount: total, note });
+  }
+}
+
+function flightPrompt(t) {
+  const r = t.request || {};
+  return `${ROLE}
+
+請列出這趟旅行可以考慮的來回航班選項，讓客戶比較後自行到航空公司或訂票網站購買。
+
+- 出發：${t.origin.city || ""}（${t.origin.code}）
+- 目的地：${t.dest.city || ""}（${t.dest.code}）
+- 去程日期：${t.startDate || "未定"}；回程日期：${tripEnd(t) || "未定"}
+- 旅客：${t.travelers || passengers(t) + " 人"}
+- 旅行型態與步調：${[t.style, t.pace].filter(Boolean).join("、") || "未指定"}
+- 每人總預算（含機票）：${t.budgetPerPerson || r.budget || "未指定"}
+
+規則：
+1. 列出 4–6 個選項，涵蓋傳統航空與廉價航空，可包含不同出發時段；直飛優先。
+2. 航班號碼與起降時刻依你所知的常見班表填寫；不確定的寫在 note，提醒「班號與時刻請以航空公司官網為準」。不要編造不存在的航空公司或航線。
+3. pricePerPerson 是該季節每位成人來回含稅的估算新台幣整數；廉價航空要在 baggage 說明託運行李是否另計。
+4. 時間一律是當地時間（HH:MM）；durationMin 是飛行分鐘數。
+5. note 用一句話寫出這個選項適合或不適合這組旅伴的原因（例如抵達時間對長輩、小孩的影響）。
+
+直接在對話中回覆，不要建立 artifact 或檔案。只回覆一個 \`\`\`json 程式碼區塊，區塊外不要任何其他文字。格式：
+{"options":[{"airline":"航空公司中文名稱","outbound":{"flightNo":"","from":"${t.origin.code}","to":"${t.dest.code}","date":"${t.startDate || ""}","depart":"HH:MM","arrive":"HH:MM","durationMin":0},"inbound":{"flightNo":"","from":"${t.dest.code}","to":"${t.origin.code}","date":"${tripEnd(t) || ""}","depart":"HH:MM","arrive":"HH:MM","durationMin":0},"pricePerPerson":0,"baggage":"","note":""}]}`;
+}
+
+async function importFlights(text) {
+  const st = $("#importStatus");
+  try {
+    const raw = String(text || "").trim();
+    const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    const body = (fence ? fence[1] : raw).trim();
+    let data;
+    try { data = JSON.parse(body); } catch { data = extractJson(body); }
+    const list = Array.isArray(data) ? data : data?.options;
+    if (!Array.isArray(list) || !list.length) throw new Error("找不到 options 航班清單");
+    const added = normalizeFlights({ options: list.map((o, i) => ({ ...o, id: `f-${Date.now().toString(36)}-${i}`, source: "claude" })) }).options;
+    trip.flights = { ...trip.flights, options: [...trip.flights.options, ...added] };
+    $("#promptPanel").hidden = true;
+    if (await persistFlights(`已加入 ${added.length} 個航班選項`)) $("#flights").scrollIntoView({ block: "start" });
+  } catch (err) {
+    st.className = "status err";
+    st.textContent = err instanceof SyntaxError
+      ? "JSON 格式有誤，常見原因是回覆被截斷。請請 Claude「繼續」或重新產生，再貼一次完整內容。"
+      : "無法匯入：" + err.message + "。請確認貼上的是 Claude 回覆中的整段 JSON。";
+  }
+}
+
+$("#book").addEventListener("click", async e => {
+  const b = e.target.closest("[data-fl]"); if (!b || !trip) return;
+  const act = b.dataset.fl, f = trip.flights, id = b.dataset.id;
+  if (act === "prompt") return showPrompt(flightPrompt(trip), "航班選項提示詞", "flights");
+  if (act === "add") return openFlightForm(null);
+  if (act === "edit") return openFlightForm(f.options.find(o => o.id === id));
+  if (act === "cancel") { $("#flForm").hidden = true; return; }
+  if (!flightEditable()) return;
+  if (act === "del") {
+    if (b.dataset.confirm !== "1") { b.dataset.confirm = "1"; b.textContent = "確認刪除"; return; }
+    trip.flights = { ...f, options: f.options.filter(o => o.id !== id), ...(f.chosenId === id ? { chosenId: null, booked: false } : {}) };
+    return persistFlights("已刪除航班");
+  }
+  if (act === "choose") {
+    const o = f.options.find(o => o.id === id); if (!o) return;
+    trip.flights = { ...f, chosenId: id, booked: false };
+    applyFlightToPlan(trip, o);
+    if (await persistFlights("已選定航班並更新行程與預算；時間有變動時，可按「依這個航班調整行程」")) $("#flights").scrollIntoView({ block: "start" });
+    return;
+  }
+  if (act === "booked") { trip.flights = { ...f, booked: !f.booked }; return persistFlights(f.booked ? "已改為尚未訂位" : "已標示為已訂位"); }
+  if (act === "pnr") {
+    store.set("rb.pnr." + trip.id, ($("#flPnr").value || "").trim().toUpperCase());
+    return toast("訂位代號已存在這台電腦");
+  }
+  if (act === "adjust") {
+    const o = f.options.find(o => o.id === f.chosenId); if (!o) return;
+    const leg = (l, name) => l.flightNo || l.depart ? `${name} ${l.flightNo || ""} ${l.date || ""} ${l.depart || "?"} 起飛、${l.arrive || "?"} 抵達` : "";
+    $("#refineText").value = `改搭${o.airline}：${[leg(o.outbound, "去程"), leg(o.inbound, "回程")].filter(Boolean).join("；")}（當地時間）。請依新的抵達與起飛時間調整第一天與最後一天的行程，其他天維持不變。`;
+    $("#refine").scrollIntoView({ block: "center" });
+    toast("已填好調整需求，按「產生調整提示詞」即可");
+  }
+});
+$("#book").addEventListener("submit", async e => {
+  if (e.target.id !== "flForm") return;
+  e.preventDefault();
+  const v = id => ($("#" + id)?.value || "").trim();
+  if (!v("fe-airline")) { $("#flFormStatus").className = "status err"; $("#flFormStatus").textContent = "請填寫航空公司。"; return; }
+  const leg = k => ({ flightNo: v(`fe-${k}-no`), from: v(`fe-${k}-from`), to: v(`fe-${k}-to`), date: v(`fe-${k}-date`), depart: v(`fe-${k}-dep`), arrive: v(`fe-${k}-arr`), durationMin: v(`fe-${k}-dur`) });
+  const id = e.target.dataset.id;
+  const prev = trip.flights.options.find(o => o.id === id);
+  const [opt] = normalizeFlights({ options: [{ id: id || `f-${Date.now().toString(36)}`, airline: v("fe-airline"), outbound: leg("out"), inbound: leg("in"),
+    priceTotal: v("fe-total"), pricePerPerson: v("fe-per"), baggage: v("fe-bag"), note: v("fe-note"), source: prev?.source === "claude" ? "claude" : "manual" }] }).options;
+  const options = id ? trip.flights.options.map(o => o.id === id ? opt : o) : [...trip.flights.options, opt];
+  trip.flights = { ...trip.flights, options };
+  // 編輯的是已選航班：同步更新行程與預算
+  if (id && trip.flights.chosenId === id) applyFlightToPlan(trip, opt);
+  if (await persistFlights(id ? "已更新航班" : "已新增航班")) $("#flights").scrollIntoView({ block: "start" });
 });
 
 /* ---------- 下載與列印 ---------- */
