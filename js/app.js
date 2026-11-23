@@ -861,6 +861,9 @@ function normalizeLookup(lk) {
     const key = String(name).trim().slice(0, 30); if (!key) continue;
     out[key] = {
       fetchedAt: String(v?.fetchedAt || "").slice(0, 10), note: String(v?.note || "").slice(0, 300),
+      via: v?.via === "search" ? "search" : "", model: String(v?.model || "").slice(0, 40),
+      sources: (Array.isArray(v?.sources) ? v.sources : []).slice(0, 15)
+        .map(x => ({ title: String(x?.title || "").slice(0, 120), uri: safeUrl(x?.uri) })).filter(x => x.uri),
       outbound: (Array.isArray(v?.outbound) ? v.outbound : []).slice(0, 20).map(x => fl(x, "out")).filter(x => x.flightNo),
       inbound: (Array.isArray(v?.inbound) ? v.inbound : []).slice(0, 20).map(x => fl(x, "in")).filter(x => x.flightNo),
     };
@@ -939,6 +942,7 @@ function lookupHtml(t, edit) {
           : `<small>查詢日期 ${esc(v.fetchedAt || "—")}</small>`}
         ${edit && !v.published ? `<button class="btn ghost" type="button" data-lk="requery" data-air="${esc(name)}">重新查詢</button><button class="btn ghost" type="button" data-lk="remove" data-air="${esc(name)}">移除</button>` : ""}</div>
       ${v.note ? `<p class="lk-note">${esc(v.note)}</p>` : ""}
+      ${v.sources?.length ? `<details class="lk-sources"><summary>查詢時參考的網頁（${v.sources.length}）</summary><ul>${v.sources.map(x => `<li><a href="${esc(x.uri)}" target="_blank" rel="noopener">${esc(x.title || x.uri)}</a></li>`).join("")}</ul></details>` : ""}
       <div class="lk-cols">
         <div><h5>去程・${esc(fmtDate(out) || "出發日")} ${esc(t.origin.code)}→${esc(t.dest.code)}</h5>
           ${v.outbound.length ? `<ul class="lk-list">${v.outbound.map(x => flightRow(name, x)).join("")}</ul>` : `<p class="status">查不到直飛航班</p>`}</div>
@@ -957,11 +961,16 @@ function lookupHtml(t, edit) {
   const picker = edit ? `
     <div class="lk-picker">
       <label for="lkAirline">航空公司</label>
-      <input id="lkAirline" list="lkAirlines" placeholder="例：中華航空" autocomplete="off">
+      <input id="lkAirline" list="lkAirlines" placeholder="例：中華航空" autocomplete="off" value="${esc(lkInput)}">
       <datalist id="lkAirlines">${AIRLINES.map(a => `<option value="${esc(a)}"></option>`).join("")}</datalist>
-      <button class="btn primary" type="button" data-lk="query">查這家的當日航班</button>
+      ${canSearch() ? `<button class="btn primary" type="button" data-lk="search"${lkBusy ? " disabled" : ""}>${lkBusy ? "查詢中…" : "查這家的當日航班"}</button>
+        <button class="btn ghost" type="button" data-lk="query">改用 claude.ai 查詢</button>`
+        : `<button class="btn primary" type="button" data-lk="query">查這家的當日航班</button>`}
     </div>
-    <p class="status">${hasPublished ? "下方標示「Claude Code 已查好」的航班不需要再查。要查其他航空公司，可以在 Claude Code 對話中請它加入，或" : ""}按上方按鈕產生提示詞，貼到 claude.ai 並開啟「網路搜尋」，再把回覆貼回來。</p>` : "";
+    ${lkBusy ? `<p class="status lk-busy" role="status">正在上網查詢${esc(lkBusy)}的航班，約需 15～50 秒，請稍候…</p>` : ""}
+    <p class="status">${canSearch()
+      ? "按「查這家的當日航班」，網站會直接上網查詢並列在下方，一次查一家，結果會累積。查詢失敗或額度用完時，可以改用 claude.ai 查詢。"
+      : `${hasPublished ? "下方標示「Claude Code 已查好」的航班不需要再查。" : ""}按上方按鈕產生提示詞，貼到 claude.ai 並開啟「網路搜尋」，再把回覆貼回來。`}</p>` : "";
 
   if (!edit && !names.length) return "";
   return `<div class="lk-block">
@@ -987,6 +996,32 @@ function airlinePrompt(t, airline) {
 
 直接在對話中回覆，不要建立 artifact 或檔案。最後只回覆一個 \`\`\`json 程式碼區塊，格式：
 {"airline":"${airline}","outbound":[{"flightNo":"","depart":"HH:MM","arrive":"HH:MM","durationMin":0,"days":"","note":"","source":"https://..."}],"inbound":[{"flightNo":"","depart":"HH:MM","arrive":"HH:MM","durationMin":0,"days":"","note":"","source":"https://..."}],"note":""}`;
+}
+
+/* ---------- 直接查詢（Claude Flow 後端：Gemini＋Google 搜尋） ---------- */
+/** 正在查詢的航空公司名稱；空字串表示沒有查詢在進行 */
+let lkBusy = "";
+/** 航空公司欄位的內容：畫面重新產生（查詢中、查詢失敗）時保留使用者輸入的值 */
+let lkInput = "";
+document.addEventListener("input", e => { if (e.target.id === "lkAirline") lkInput = e.target.value; });
+const canSearch = () => !!(cloud && typeof cloud.searchFlights === "function") && flightEditable();
+async function directSearch(airline) {
+  if (lkBusy) return;
+  const t = trip;
+  lkBusy = airline; show(t, meta);
+  let r;
+  try {
+    r = await cloud.searchFlights({ airline, from: t.origin.code, to: t.dest.code, outDate: t.startDate || "", backDate: tripEnd(t) || "" });
+  } catch { r = { available: false, reason: "查詢失敗，請稍後再試。" }; }
+  lkBusy = "";
+  if (trip !== t) return; // 查詢期間切換了行程，結果不套用
+  if (!r || !r.available) { show(trip, meta); toast(r?.reason || "查詢失敗，請稍後再試。"); return; }
+  const entry = normalizeLookup({ [airline]: { ...r, via: "search" } })[airline];
+  trip.flights = { ...trip.flights, lookup: { ...trip.flights.lookup, [airline]: entry } };
+  const n = entry.outbound.length + entry.inbound.length;
+  if (await persistFlights(n ? `已查到${airline}的 ${n} 個航班` : `${airline}在這條航線查不到直飛航班`)) {
+    document.querySelector(".lk-block")?.scrollIntoView({ block: "start" });
+  }
 }
 
 let lookupAirline = "";
@@ -1028,6 +1063,11 @@ function draftToOption(t, d) {
 $("#book").addEventListener("click", async e => {
   const b = e.target.closest("[data-lk]"); if (!b || !trip) return;
   const act = b.dataset.lk, name = b.dataset.air;
+  if (act === "search" || (act === "requery" && canSearch())) {
+    const airline = act === "search" ? ($("#lkAirline").value || "").trim() : name;
+    if (!airline) { $("#lkAirline").focus(); toast("請先輸入或選擇航空公司"); return; }
+    return directSearch(airline);
+  }
   if (act === "query" || act === "requery") {
     const airline = act === "query" ? ($("#lkAirline").value || "").trim() : name;
     if (!airline) { $("#lkAirline").focus(); toast("請先輸入或選擇航空公司"); return; }
