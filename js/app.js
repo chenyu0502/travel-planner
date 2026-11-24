@@ -856,6 +856,8 @@ function normalizeLookup(lk) {
     depart: /^\d{1,2}:\d{2}$/.test(x?.depart || "") ? x.depart : "", arrive: /^\d{1,2}:\d{2}$/.test(x?.arrive || "") ? x.arrive : "",
     durationMin: Math.max(0, Math.round(+x?.durationMin || 0)) || null,
     days: String(x?.days || "").slice(0, 30), note: String(x?.note || "").slice(0, 160), source: safeUrl(x?.source),
+    fareTwd: (n => n > 0 && n <= 200000 ? n : null)(Math.round(+x?.fareTwd || 0)),
+    fareNote: String(x?.fareNote || "").slice(0, 100), baggage: String(x?.baggage || "").slice(0, 60),
   });
   for (const [name, v] of Object.entries(lk).slice(0, 30)) {
     const key = String(name).trim().slice(0, 30); if (!key) continue;
@@ -928,6 +930,7 @@ function lookupHtml(t, edit) {
     return `<li class="lk-flight${picked ? " picked" : ""}">
       <div class="lk-main"><b>${esc(x.flightNo)}</b> <span class="mono nowrap">${esc(x.depart || "?")}–${esc(x.arrive || "?")}</span>
         ${x.durationMin ? `<small>${esc(fmtDur(x.durationMin))}</small>` : ""}${x.days ? `<small>・${esc(x.days)}</small>` : ""}
+        ${x.fareTwd || x.baggage ? `<div class="lk-fare">${x.fareTwd ? `參考票價 <b class="mono">NT$ ${num(x.fareTwd)}</b>／人・單程` : `<span class="lk-wait">票價未查到</span>`}${x.baggage ? `・${esc(x.baggage)}` : ""}${x.fareNote ? `<small>（${esc(x.fareNote)}）</small>` : ""}</div>` : ""}
         ${x.note ? `<div class="lk-note">${esc(x.note)}</div>` : ""}
         <div class="lk-links">${x.source ? `<a href="${esc(x.source)}" target="_blank" rel="noopener">來源</a>` : `<span class="lk-nosrc">無來源</span>`}
           <a href="${oneWayLink(...route)}" target="_blank" rel="noopener">查當日票價</a></div></div>
@@ -951,7 +954,7 @@ function lookupHtml(t, edit) {
       </div></div>`;
   }).join("");
 
-  const legStr = (d, label) => d ? `${label} <b>${esc(d.airline)} ${esc(d.flightNo)}</b> <span class="mono">${esc(d.depart || "?")}–${esc(d.arrive || "?")}</span>` : `${label} <span class="lk-wait">尚未選擇</span>`;
+  const legStr = (d, label) => d ? `${label} <b>${esc(d.airline)} ${esc(d.flightNo)}</b> <span class="mono">${esc(d.depart || "?")}–${esc(d.arrive || "?")}</span>${d.fareTwd ? ` <small class="mono">NT$ ${num(d.fareTwd)}</small>` : ""}` : `${label} <span class="lk-wait">尚未選擇</span>`;
   const draftBar = edit && flDraft && (flDraft.out || flDraft.in) ? `
     <div class="lk-draft" role="status">
       <span>${legStr(flDraft.out, "去程")}　${legStr(flDraft.in, "回程")}</span>
@@ -976,7 +979,7 @@ function lookupHtml(t, edit) {
   return `<div class="lk-block">
     <h3>依航空公司查當日航班</h3>
     ${picker}${draftBar}${groups}
-    ${names.length ? `<p class="status">時刻是從航空公司或航班動態網站查到的參考值，幾個月後的班表可能還沒正式公布，購票前請以航空公司官網為準。</p>` : ""}
+    ${names.length ? `<p class="status">時刻與票價是從航空公司、航班動態或旅遊網站查到的參考值：班表可能還沒正式公布，票價隨時變動。加入比較表時會自動填入參考票價與行李，購票前請按「查當日票價」確認。</p>` : ""}
   </div>`;
 }
 
@@ -993,9 +996,11 @@ function airlinePrompt(t, airline) {
 4. 每一班都附上 source：你實際查到這班資訊的網頁網址。查不到來源的班次不要列。
 5. 時間一律是當地時間（HH:MM）；durationMin 是飛行分鐘數；days 寫每週飛哪幾天（例如「每天」「週一、三、五」），不確定就留空。
 6. 查不到這家航空在此航線有直飛航班時，outbound、inbound 回傳空陣列，在 note 說明。不要編造班號或時刻。
+7. fareTwd：每位成人單程經濟艙的參考票價（新台幣整數，含稅），以該日期或最接近日期在航空公司官網、促銷頁、旅遊網站上看到的價格為準；查不到填 0，不要估算。fareNote 寫明價格來源與票種。
+8. baggage：經濟艙基本票種的託運行李額度（例如「託運 23 公斤 1 件」）；廉價航空若基本票價不含託運，寫「基本票價不含託運，需加購」並附加購參考價。
 
 直接在對話中回覆，不要建立 artifact 或檔案。最後只回覆一個 \`\`\`json 程式碼區塊，格式：
-{"airline":"${airline}","outbound":[{"flightNo":"","depart":"HH:MM","arrive":"HH:MM","durationMin":0,"days":"","note":"","source":"https://..."}],"inbound":[{"flightNo":"","depart":"HH:MM","arrive":"HH:MM","durationMin":0,"days":"","note":"","source":"https://..."}],"note":""}`;
+{"airline":"${airline}","outbound":[{"flightNo":"","depart":"HH:MM","arrive":"HH:MM","durationMin":0,"days":"","fareTwd":0,"fareNote":"","baggage":"","note":"","source":"https://..."}],"inbound":[{"flightNo":"","depart":"HH:MM","arrive":"HH:MM","durationMin":0,"days":"","fareTwd":0,"fareNote":"","baggage":"","note":"","source":"https://..."}],"note":""}`;
 }
 
 /* ---------- 直接查詢（Claude Flow 後端：Gemini＋Google 搜尋） ---------- */
@@ -1052,11 +1057,24 @@ async function importAirline(text) {
 function draftToOption(t, d) {
   const leg = (x, from, to, date) => x ? { flightNo: x.flightNo, from, to, date, depart: x.depart, arrive: x.arrive, durationMin: x.durationMin } : {};
   const names = [...new Set([d.out?.airline, d.in?.airline].filter(Boolean))];
-  const notes = [d.out?.note, d.in?.note].filter(Boolean).join("；");
+  const legs = [["去程", d.out], ["回程", d.in]].filter(([, x]) => x);
+  // 每人票價：選到的每一段都有參考票價才加總，否則留空，避免把單程價當成來回價
+  const allFares = legs.every(([, x]) => x.fareTwd);
+  const pricePerPerson = allFares ? legs.reduce((sum, [, x]) => sum + x.fareTwd, 0) : null;
+  const fareText = legs.map(([label, x]) => `${label} ${x.flightNo} ${x.fareTwd ? "NT$ " + num(x.fareTwd) + (x.fareNote ? "（" + x.fareNote + "）" : "") : "票價未查到"}`).join("；");
+  const bags = [...new Set(legs.map(([, x]) => x.baggage).filter(Boolean))];
+  const baggage = bags.length <= 1 ? (bags[0] || "") : legs.filter(([, x]) => x.baggage).map(([label, x]) => `${label}：${x.baggage}`).join("；");
+  const fetched = [...new Set(legs.map(([, x]) => x.fetchedAt).filter(Boolean))].join("、");
+  const notes = legs.map(([, x]) => x.note).filter(Boolean).join("；");
   return normalizeFlights({ options: [{
     id: `f-${Date.now().toString(36)}`, airline: names.join("／"), source: "claude",
     outbound: leg(d.out, t.origin.code, t.dest.code, t.startDate), inbound: leg(d.in, t.dest.code, t.origin.code, tripEnd(t)),
-    note: ["票價請按「查當日票價」後自行填入", notes].filter(Boolean).join("；"),
+    pricePerPerson, baggage,
+    note: [
+      `參考票價${fetched ? `（${fetched} 查詢）` : ""}：${fareText}`,
+      allFares ? "總價以成人票價 × 人數估算，兒童票價不同，實際以購票時為準" : "未查到完整票價，請按「查當日票價」後用「編輯」填入",
+      notes,
+    ].filter(Boolean).join("；"),
   }] }).options[0];
 }
 
@@ -1078,7 +1096,7 @@ $("#book").addEventListener("click", async e => {
   if (act === "pick") {
     const v = mergedLookup(trip)[name]; if (!v) return;
     const x = (b.dataset.dir === "out" ? v.outbound : v.inbound).find(f => f.flightNo === b.dataset.no); if (!x) return;
-    flDraft = { ...(flDraft || {}), [b.dataset.dir]: { ...x, airline: name } };
+    flDraft = { ...(flDraft || {}), [b.dataset.dir]: { ...x, airline: name, fetchedAt: v.fetchedAt || "" } };
     show(trip, meta);
     document.querySelector(".lk-draft")?.scrollIntoView({ block: "nearest" });
     if (flDraft.out && flDraft.in) toast("去程、回程都選好了，按「加入比較表」");

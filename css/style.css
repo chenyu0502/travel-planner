@@ -281,6 +281,8 @@ footer{margin:40px 0 30px;color:var(--muted);font-size:12.5px}
 .lk-links{display:flex;gap:12px;font-size:12.5px;margin-top:3px}
 .lk-nosrc{color:var(--warn)}
 .lk-busy{color:var(--accent);font-weight:700}
+.lk-fare{font-size:13px;margin-top:2px}
+.lk-fare small{color:var(--muted);margin-left:2px}
 .lk-sources{margin:4px 0 0;font-size:12.5px}
 .lk-sources summary{cursor:pointer;color:var(--muted)}
 .lk-sources ul{margin:4px 0 0;padding-left:18px}
