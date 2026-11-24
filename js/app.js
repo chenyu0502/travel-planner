@@ -61,6 +61,7 @@ function normalize(d) {
   };
   out.overview.passes = arr(out.overview.passes);
   out.flights = normalizeFlights(d.flights);
+  out.hotels = normalizeHotels(d.hotels);
   if (!out.dayPlans.length) throw new Error("沒有每日行程");
   return out;
 }
@@ -173,7 +174,7 @@ function render(t) {
       <p class="status" style="margin:10px 0 0">電話號碼可長按或點兩下選取複製。建議另外抄寫一份放在錢包。</p></div>
   </section>`;
 
-  $("#book").innerHTML = pass + overview + flightsHtml(t) +
+  $("#book").innerHTML = pass + overview + flightsHtml(t) + hotelsHtml(t) +
     `<section class="block" id="days"><h2>每日行程 <span class="eyebrow">Daily route</span></h2><nav class="daytabs" aria-label="跳到某一天">${tabs}</nav>${days}</section>` +
     budget + bookings + checklist + notes + emergency;
   updateProgress();
@@ -536,7 +537,7 @@ ${SCHEMA}`;
 let importMode = "trip";
 function showPrompt(text, title, mode = "trip") {
   importMode = mode;
-  $("label[for=importText]").textContent = { flights: "匯入 Claude 回覆的航班選項 JSON", airline: "匯入 Claude 回覆的當日航班 JSON（整段回覆貼上即可）" }[mode] || "匯入 Claude 回覆的 JSON";
+  $("label[for=importText]").textContent = { flights: "匯入 Claude 回覆的航班選項 JSON", airline: "匯入 Claude 回覆的當日航班 JSON（整段回覆貼上即可）", hotels: "匯入 Claude 回覆的飯店 JSON（整段回覆貼上即可）" }[mode] || "匯入 Claude 回覆的 JSON";
   $("#promptTitle").textContent = title;
   $("#promptText").value = text;
   $("#promptPanel").hidden = false; $("#planner").hidden = true; $("#savedPanel").hidden = true;
@@ -593,6 +594,7 @@ function extractJson(text) {
 async function importTrip(text) {
   if (importMode === "flights") return importFlights(text);
   if (importMode === "airline") return importAirline(text);
+  if (importMode === "hotels") return importHotels(text);
   const st = $("#importStatus");
   try {
     const t = normalize(extractJson(text));
@@ -602,6 +604,7 @@ async function importTrip(text) {
     if (refining) t.id = pendingBase.id;
     // Claude 的調整結果不一定帶回機票比較資料，沿用原本的
     if (refining && !t.flights.options.length && pendingBase.flights) t.flights = pendingBase.flights;
+    if (refining && !t.hotels.searches.length && !t.hotels.picks.length && pendingBase.hotels) t.hotels = pendingBase.hotels;
     const targetId = refining && pendingMeta && pendingMeta.source === "cloud" && pendingMeta.isOwner ? pendingMeta.id : undefined;
     if (pendingRequest) { t.request = pendingRequest; if (!t.people) t.people = (pendingRequest.adults + pendingRequest.seniors + pendingRequest.kids) || null; }
     pendingBase = null; pendingMeta = null; pendingRequest = null;
@@ -1190,6 +1193,311 @@ $("#book").addEventListener("submit", async e => {
   // 編輯的是已選航班：同步更新行程與預算
   if (id && trip.flights.chosenId === id) applyFlightToPlan(trip, opt);
   if (await persistFlights(id ? "已更新航班" : "已新增航班")) $("#flights").scrollIntoView({ block: "start" });
+});
+
+/* ---------- 住宿：依地區或景點搜尋附近飯店、比較、選定 ----------
+ * 與機票相同的做法：在 Claude Flow 底下由後端（Gemini＋Google 搜尋）直接查詢，
+ * 也可以改用 claude.ai 提示詞。可以分段（例如京都 3 晚、大阪 1 晚），每段各自選定。
+ * 選定後寫回每天的「今晚住宿」與預算的住宿金額。訂房確認碼只存在這台電腦。
+ */
+const HOTEL_LEVELS = ["經濟", "舒適", "精品", "奢華"];
+function normalizeHotel(x) {
+  const name = String(x?.name || "").trim().slice(0, 80);
+  if (!name) return null;
+  const int = (v, max) => { const n = Math.round(+v || 0); return n > 0 && n <= max ? n : null; };
+  const one = (v, max) => { const n = Math.round((+v || 0) * 10) / 10; return n > 0 && n <= max ? n : null; };
+  return {
+    name, nameLocal: String(x?.nameLocal || "").trim().slice(0, 100), area: String(x?.area || "").slice(0, 40),
+    access: String(x?.access || "").slice(0, 80), walkMin: int(x?.walkMin, 120),
+    pricePerNightTwd: int(x?.pricePerNightTwd, 500000), rooms: int(x?.rooms, 10) || 1, roomNote: String(x?.roomNote || "").slice(0, 60),
+    rating: one(x?.rating, 10), ratingNote: String(x?.ratingNote || "").slice(0, 40),
+    highlights: String(x?.highlights || "").slice(0, 160), cautions: String(x?.cautions || "").slice(0, 160), source: safeUrl(x?.source),
+  };
+}
+const nightsBetween = (a, b) => a && b ? Math.max(0, Math.round((Date.parse(b) - Date.parse(a)) / 86400000)) : 0;
+function normalizeHotels(h) {
+  const arr = v => Array.isArray(v) ? v : [];
+  const D = v => /^\d{4}-\d{2}-\d{2}$/.test(v || "") ? v : "";
+  const searches = arr(h?.searches).slice(0, 10).map((g, i) => ({
+    id: String(g?.id || `hs-${Date.now().toString(36)}-${i}`), area: String(g?.area || "").slice(0, 60),
+    checkIn: D(g?.checkIn), checkOut: D(g?.checkOut), fetchedAt: String(g?.fetchedAt || "").slice(0, 10),
+    note: String(g?.note || "").slice(0, 300), via: g?.via === "search" ? "search" : "",
+    sources: arr(g?.sources).slice(0, 15).map(x => ({ title: String(x?.title || "").slice(0, 120), uri: safeUrl(x?.uri) })).filter(x => x.uri),
+    hotels: arr(g?.hotels).map(normalizeHotel).filter(Boolean).slice(0, 12),
+  })).filter(g => g.area);
+  const picks = arr(h?.picks).slice(0, 10).map((p, i) => {
+    const hotel = normalizeHotel(p); if (!hotel) return null;
+    const checkIn = D(p?.checkIn), checkOut = D(p?.checkOut), nights = nightsBetween(checkIn, checkOut) || Math.max(0, Math.round(+p?.nights || 0));
+    return { ...hotel, id: String(p?.id || `hp-${Date.now().toString(36)}-${i}`), checkIn, checkOut, nights,
+      priceTotal: Math.max(0, Math.round(+p?.priceTotal || 0)) || (hotel.pricePerNightTwd && nights ? hotel.pricePerNightTwd * nights : null),
+      booked: !!p?.booked };
+  }).filter(Boolean).sort((a, b) => (a.checkIn || "").localeCompare(b.checkIn || ""));
+  return { searches, picks };
+}
+
+/** 搜尋表單的內容：畫面重新產生時保留 */
+let htForm = null;
+let htBusy = "";
+const canSearchHotels = () => !!(cloud && typeof cloud.searchHotels === "function") && flightEditable();
+function htDefaults(t) {
+  const r = t.request || {};
+  const lvl = HOTEL_LEVELS.find(l => String(r.stay || "").startsWith(l)) || "舒適";
+  return { area: "", checkIn: t.startDate || "", checkOut: t.startDate ? addDays(t.startDate, Math.max(1, t.days - 1)) : "", level: lvl, budget: "", notes: "" };
+}
+document.addEventListener("input", e => {
+  const m = /^ht-(area|in|out|level|budget|notes)$/.exec(e.target.id || ""); if (!m || !htForm) return;
+  htForm[{ area: "area", in: "checkIn", out: "checkOut", level: "level", budget: "budget", notes: "notes" }[m[1]]] = e.target.value;
+});
+function partyOf(t) {
+  const r = t.request || {};
+  const adults = (r.adults || 0), seniors = (r.seniors || 0), kids = (r.kids || 0);
+  if (adults + seniors + kids) return { adults, seniors, kids, kidAges: r.kidAges || "" };
+  // 沒有原始表單（例如匯入的行程）：從旅伴文字解析，例如「成人 2、長輩 1（68 歲）」「成人 3、兒童 2」
+  const txt = String(t.travelers || "");
+  const count = re => +((txt.match(re) || [])[1] || 0);
+  const parsed = { adults: count(/成人\s*(\d+)/), seniors: count(/長輩[^\d、，,]*?(\d+)/), kids: count(/(?:兒童|小孩)\s*(\d+)/) };
+  const ages = ((txt.match(/(?:兒童|小孩)\s*\d+\s*[（(]([^）)]*)[）)]/) || [])[1] || "").replace(/歲/g, "").trim();
+  return parsed.adults + parsed.seniors + parsed.kids ? { ...parsed, kidAges: ages } : { adults: passengers(t), seniors: 0, kids: 0, kidAges: "" };
+}
+function bookingLink(t, h, g) {
+  const p = partyOf(t);
+  const ages = (String(p.kidAges).match(/\d+/g) || []).slice(0, p.kids);
+  while (ages.length < p.kids) ages.push("8");
+  const q = new URLSearchParams({ ss: h.nameLocal || h.name, group_adults: String(Math.max(1, p.adults + p.seniors)), group_children: String(p.kids), no_rooms: String(h.rooms || 1) });
+  if (g.checkIn) q.set("checkin", g.checkIn);
+  if (g.checkOut) q.set("checkout", g.checkOut);
+  return "https://www.booking.com/searchresults.zh-tw.html?" + q.toString() + ages.map(a => "&age=" + a).join("");
+}
+const dateRange = (a, b) => a && b ? `${fmtDate(a)}–${fmtDate(b)}・${nightsBetween(a, b)} 晚` : (a ? `${fmtDate(a)} 入住` : "日期未定");
+
+function hotelsHtml(t) {
+  const H = t.hotels, edit = flightEditable();
+  if (!htForm || htForm.tripId !== t.id) htForm = { tripId: t.id, ...htDefaults(t) };
+  const people = passengers(t);
+  const totalNights = Math.max(0, t.days - 1);
+  const areas = [...new Set(t.dayPlans.flatMap(p => [p.area, p.stay]).map(s => String(s || "").split(/[→（(]/)[0].trim()).filter(Boolean))].slice(0, 12);
+
+  const picks = H.picks.length ? `
+    <div class="ht-picks">
+      <span class="eyebrow">已選住宿</span>
+      ${H.picks.map(p => {
+        const conf = edit && p.booked ? store.get(`rb.hotelconf.${t.id}.${p.id}`, "") : "";
+        return `<div class="ht-pick">
+          <div class="ht-pick-main"><b>${esc(p.name)}</b> <small>${esc(p.area)}</small>
+            <div class="status">${esc(dateRange(p.checkIn, p.checkOut))}・${p.priceTotal ? `約 NT$ ${num(p.priceTotal)}` : "價格未查到"}${p.roomNote ? `・${esc(p.roomNote)}` : ""}・<span class="fl-state ${p.booked ? "ok" : ""}">${p.booked ? "已訂房" : "尚未訂房"}</span></div></div>
+          ${edit ? `<div class="fl-chosen-actions">
+            <button class="btn" type="button" data-ht="booked" data-id="${esc(p.id)}">${p.booked ? "改為尚未訂房" : "標示為已訂房"}</button>
+            <button class="btn ghost" type="button" data-ht="unpick" data-id="${esc(p.id)}">取消選擇</button></div>
+            ${p.booked ? `<div class="fl-pnr"><label for="htConf-${esc(p.id)}">訂房確認碼（只存在這台電腦，不會分享出去）</label>
+              <div class="fl-pnr-row"><input id="htConf-${esc(p.id)}" maxlength="30" autocomplete="off" value="${esc(conf)}"><button class="btn" type="button" data-ht="conf" data-id="${esc(p.id)}">儲存</button></div></div>` : ""}` : ""}
+        </div>`;
+      }).join("")}
+    </div>` : "";
+
+  const f = htForm;
+  const form = edit ? `
+    <div class="ht-form">
+      <div class="field ht-area"><label for="ht-area">地區或景點 *</label><input id="ht-area" list="htAreas" value="${esc(f.area)}" placeholder="例：京都站、難波、伏見稻荷">
+        <datalist id="htAreas">${areas.map(a => `<option value="${esc(a)}"></option>`).join("")}</datalist></div>
+      <div class="field"><label for="ht-in">入住</label><input id="ht-in" type="date" value="${esc(f.checkIn)}"></div>
+      <div class="field"><label for="ht-out">退房</label><input id="ht-out" type="date" value="${esc(f.checkOut)}"></div>
+      <div class="field"><label for="ht-level">等級</label><select id="ht-level">${HOTEL_LEVELS.map(l => `<option${l === f.level ? " selected" : ""}>${l}</option>`).join("")}</select></div>
+      <div class="field"><label for="ht-budget">每晚預算（全體，NT$）</label><input id="ht-budget" type="number" min="0" step="500" value="${esc(f.budget)}" placeholder="不限"></div>
+      <div class="field ht-notes"><label for="ht-notes">其他需求</label><input id="ht-notes" value="${esc(f.notes)}" placeholder="例：要有大浴場、可放嬰兒車"></div>
+    </div>
+    <div class="actions ht-tools">
+      ${canSearchHotels()
+        ? `<button class="btn primary" type="button" data-ht="search"${htBusy ? " disabled" : ""}>${htBusy ? "搜尋中…" : "搜尋附近飯店"}</button>
+           <button class="btn ghost" type="button" data-ht="query">改用 claude.ai 查詢</button>`
+        : `<button class="btn primary" type="button" data-ht="query">搜尋附近飯店</button>`}
+    </div>
+    ${htBusy ? `<p class="status lk-busy" role="status">正在上網搜尋${esc(htBusy)}附近的飯店，約需 15～50 秒，請稍候…</p>` : ""}
+    <p class="status">${canSearchHotels() ? "網站會直接上網搜尋並列在下方；" : "會產生一段提示詞，請貼到 claude.ai 並開啟「網路搜尋」，再把回覆貼回來；"}住兩個地方時，分段搜尋並各選一間。</p>`
+    : (meta.source === "sample" ? `<p class="status">範例行程不能修改。建立或匯入自己的行程後，就能搜尋與選擇飯店。</p>` : "");
+
+  const pickedKey = (g, h) => H.picks.some(p => p.name === h.name && p.checkIn === g.checkIn && p.checkOut === g.checkOut);
+  const groups = H.searches.map(g => {
+    const n = nightsBetween(g.checkIn, g.checkOut);
+    return `<div class="lk-airline ht-group">
+      <div class="lk-head"><h4>${esc(g.area)}附近</h4><small>${esc(dateRange(g.checkIn, g.checkOut))}・查詢日期 ${esc(g.fetchedAt || "—")}</small>
+        ${edit ? `<button class="btn ghost" type="button" data-ht="requery" data-gid="${esc(g.id)}">重新搜尋</button><button class="btn ghost" type="button" data-ht="remove" data-gid="${esc(g.id)}">移除</button>` : ""}</div>
+      ${g.note ? `<p class="lk-note">${esc(g.note)}</p>` : ""}
+      ${g.sources.length ? `<details class="lk-sources"><summary>搜尋時參考的網頁（${g.sources.length}）</summary><ul>${g.sources.map(x => `<li><a href="${esc(x.uri)}" target="_blank" rel="noopener">${esc(x.title || x.uri)}</a></li>`).join("")}</ul></details>` : ""}
+      ${g.hotels.length ? `<ul class="ht-list">${g.hotels.map((h, i) => {
+        const picked = pickedKey(g, h);
+        return `<li class="ht-card${picked ? " picked" : ""}">
+          <div class="ht-main">
+            <div class="ht-name"><b>${esc(h.name)}</b>${h.nameLocal && h.nameLocal !== h.name ? ` <small>${esc(h.nameLocal)}</small>` : ""}</div>
+            <div class="ht-meta">${[h.area, h.access, h.walkMin ? `步行約 ${h.walkMin} 分` : ""].filter(Boolean).map(esc).join("・")}</div>
+            <div class="ht-price">${h.pricePerNightTwd ? `每晚約 <b class="mono">NT$ ${num(h.pricePerNightTwd)}</b>（全體${h.rooms > 1 ? `・${h.rooms} 間` : ""}）${n ? `・${n} 晚約 NT$ ${num(h.pricePerNightTwd * n)}` : ""}` : `<span class="lk-wait">價格未查到</span>`}
+              ${h.roomNote ? `<small>・${esc(h.roomNote)}</small>` : ""}${h.rating ? `<small>・評分 ${h.rating}${h.ratingNote ? `（${esc(h.ratingNote)}）` : ""}</small>` : ""}</div>
+            ${h.highlights ? `<div class="ht-good">${esc(h.highlights)}</div>` : ""}
+            ${h.cautions ? `<div class="ht-warn">注意：${esc(h.cautions)}</div>` : ""}
+            <div class="lk-links">${h.source ? `<a href="${esc(h.source)}" target="_blank" rel="noopener">來源</a>` : `<span class="lk-nosrc">無來源</span>`}
+              <a href="${gmap(h.nameLocal || h.name)}" target="_blank" rel="noopener">地圖</a>
+              <a href="${bookingLink(t, h, g)}" target="_blank" rel="noopener">在 Booking.com 查房價</a></div>
+          </div>
+          ${edit ? `<button class="btn ${picked ? "primary" : ""}" type="button" data-ht="choose" data-gid="${esc(g.id)}" data-i="${i}"${picked ? " disabled" : ""}>${picked ? "已選" : "選這間"}</button>` : (picked ? `<span class="badge-chosen">已選</span>` : "")}
+        </li>`;
+      }).join("")}</ul>` : `<p class="status">沒有找到符合的飯店。</p>`}
+    </div>`;
+  }).join("");
+
+  return `
+  <section class="block" id="hotels">
+    <h2>住宿 <span class="eyebrow">Hotels</span></h2>
+    <div class="panel">
+      <p class="fl-route">${esc(t.dest.city || t.dest.code)}・${totalNights} 晚・${people} 人</p>
+      ${picks}${form}${groups}
+      ${H.searches.length ? `<p class="status">房價與評分是從訂房網站、官網查到的參考值，房價隨日期與空房變動；選這間後會自動填入每天的住宿與預算，訂房前請按「在 Booking.com 查房價」確認。</p>` : ""}
+    </div>
+  </section>`;
+}
+
+async function persistTrip(msg) {
+  if (await saveTrip(trip)) { if (msg) toast(msg); return true; }
+  return false;
+}
+
+/** 把已選的住宿寫回行程：每天的「今晚住宿」與預算的住宿金額 */
+function applyHotelsToPlan(t) {
+  const picks = t.hotels.picks;
+  for (const p of t.dayPlans) {
+    if (!p.date) continue;
+    const pick = picks.find(x => x.checkIn && x.checkOut && x.checkIn <= p.date && p.date < x.checkOut);
+    if (pick) p.stay = `${pick.name}${pick.area ? `（${pick.area}）` : ""}`;
+  }
+  const priced = picks.filter(x => x.priceTotal);
+  if (!priced.length) return;
+  const total = priced.reduce((s, x) => s + x.priceTotal, 0);
+  const missing = picks.length - priced.length;
+  const note = picks.map(x => `${x.name} ${x.nights || "?"} 晚`).join("、") + (missing ? `；另有 ${missing} 間未查到價格` : "");
+  const b = t.budget.items.find(x => /住宿|飯店|旅館/.test(x.category));
+  if (b) { b.amount = total; b.note = note; } else t.budget.items.unshift({ category: "住宿", amount: total, note });
+}
+
+function hotelPrompt(t, f) {
+  const p = partyOf(t);
+  const who = [p.adults && `成人 ${p.adults}`, p.seniors && `長輩（65 歲以上）${p.seniors}`, p.kids && `兒童 ${p.kids}${p.kidAges ? `（${p.kidAges} 歲）` : ""}`].filter(Boolean).join("、");
+  const n = nightsBetween(f.checkIn, f.checkOut);
+  return `請使用網路搜尋，查詢「${t.dest.city || ""} ${f.area}」附近適合的飯店，列出 6～10 間讓我比較。
+
+- 入住：${f.checkIn || "未定"}；退房：${f.checkOut || "未定"}${n ? `（${n} 晚）` : ""}
+- 旅客：${who}
+- 住宿等級：${f.level || "不限"}
+- 每晚預算（全體，新台幣）：${f.budget || "不限"}
+- 其他需求：${f.notes || "無"}
+
+規則：
+1. 以「${f.area}」為中心，步行或搭車 20 分鐘內為主；walkMin 是步行到該地點或最近車站的分鐘數，access 寫最近的車站與步行時間。
+2. 涵蓋不同價位；有長輩或兒童時，優先列出有家庭房、電梯、離車站近的飯店。
+3. pricePerNightTwd 是這組旅伴「全體每晚」的參考價（新台幣整數，含稅），以這個日期或最接近日期在訂房網站、官網看到的價格為準；查不到填 0，不要估算。rooms 是需要幾間房，roomNote 寫房型。
+4. rating 照訂房網站或 Google 的原始分數填寫，ratingNote 寫來源與滿分；查不到填 0。
+5. highlights 寫 1～2 句優點；cautions 寫需要注意的地方，沒有就留空。nameLocal 寫當地語言或英文正式名稱。
+6. 每間都附上實際查到資料的網頁網址（source）。不要編造飯店、價格或評分。
+
+直接在對話中回覆，不要建立 artifact 或檔案。最後只回覆一個 \`\`\`json 程式碼區塊，格式：
+{"hotels":[{"name":"","nameLocal":"","area":"","access":"","walkMin":0,"pricePerNightTwd":0,"rooms":1,"roomNote":"","rating":0,"ratingNote":"","highlights":"","cautions":"","source":"https://..."}],"note":""}`;
+}
+
+/** 新增或取代一組搜尋結果（同地點、同日期視為同一組） */
+function addHotelSearch(group) {
+  const others = trip.hotels.searches.filter(g => !(g.id === group.id || (g.area === group.area && g.checkIn === group.checkIn && g.checkOut === group.checkOut)));
+  const [norm] = normalizeHotels({ searches: [group] }).searches;
+  trip.hotels = { ...trip.hotels, searches: [norm, ...others].slice(0, 10) };
+  return norm;
+}
+
+let htPending = null; // 用 claude.ai 查詢時，記下這次的地點與日期
+async function importHotels(text) {
+  const st = $("#importStatus");
+  try {
+    const raw = String(text || "").trim();
+    const fences = [...raw.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+    const body = (fences.length ? fences[fences.length - 1][1] : raw).trim();
+    let data;
+    try { data = JSON.parse(body); } catch { data = extractJson(body); }
+    const list = Array.isArray(data) ? data : data?.hotels;
+    if (!Array.isArray(list)) throw new Error("找不到 hotels 飯店清單");
+    const f = htPending || { area: "未指定地點", checkIn: "", checkOut: "" };
+    const g = addHotelSearch({ id: f.id, area: f.area, checkIn: f.checkIn, checkOut: f.checkOut, hotels: list, note: data?.note || "", fetchedAt: new Date().toISOString().slice(0, 10) });
+    htPending = null;
+    $("#promptPanel").hidden = true;
+    if (await persistTrip(g.hotels.length ? `已加入${g.area}附近的 ${g.hotels.length} 間飯店` : "沒有找到符合的飯店")) $("#hotels").scrollIntoView({ block: "start" });
+  } catch (err) {
+    st.className = "status err";
+    st.textContent = err instanceof SyntaxError
+      ? "JSON 格式有誤，常見原因是回覆被截斷。請請 Claude「繼續」或重新產生，再貼一次完整內容。"
+      : "無法匯入：" + err.message + "。請確認貼上的是 Claude 回覆中的 JSON。";
+  }
+}
+
+async function directHotelSearch(f, gid) {
+  if (htBusy) return;
+  const t = trip, p = partyOf(t);
+  htBusy = f.area; show(t, meta);
+  let r;
+  try {
+    r = await cloud.searchHotels({ area: f.area, city: t.dest.city || "", checkIn: f.checkIn || "", checkOut: f.checkOut || "",
+      ...p, level: f.level || "", budgetPerNight: +f.budget || 0, notes: f.notes || "" });
+  } catch { r = { available: false, reason: "搜尋失敗，請稍後再試。" }; }
+  htBusy = "";
+  if (trip !== t) return;
+  if (!r || !r.available) { show(trip, meta); toast(r?.reason || "搜尋失敗，請稍後再試。"); return; }
+  const g = addHotelSearch({ id: gid, area: f.area, checkIn: f.checkIn, checkOut: f.checkOut, hotels: r.hotels, note: r.note, sources: r.sources, via: "search", fetchedAt: r.fetchedAt });
+  if (await persistTrip(g.hotels.length ? `已找到${g.area}附近的 ${g.hotels.length} 間飯店` : "沒有找到符合的飯店")) document.querySelector(".ht-group")?.scrollIntoView({ block: "start" });
+}
+
+$("#book").addEventListener("click", async e => {
+  const b = e.target.closest("[data-ht]"); if (!b || !trip) return;
+  const act = b.dataset.ht, H = trip.hotels;
+  const formValues = () => ({ ...htForm, area: (htForm.area || "").trim() });
+  if (act === "search" || act === "query") {
+    const f = formValues();
+    if (!f.area) { $("#ht-area")?.focus(); toast("請先輸入地區或景點"); return; }
+    if (f.checkIn && f.checkOut && f.checkOut <= f.checkIn) { toast("退房日期必須晚於入住日期"); return; }
+    if (act === "search") return directHotelSearch(f);
+    htPending = f;
+    return showPrompt(hotelPrompt(trip, f), `搜尋${f.area}附近的飯店`, "hotels");
+  }
+  if (act === "requery") {
+    const g = H.searches.find(x => x.id === b.dataset.gid); if (!g) return;
+    const f = { ...htForm, area: g.area, checkIn: g.checkIn, checkOut: g.checkOut, id: g.id };
+    if (canSearchHotels()) return directHotelSearch(f, g.id);
+    htPending = f;
+    return showPrompt(hotelPrompt(trip, f), `搜尋${g.area}附近的飯店`, "hotels");
+  }
+  if (!flightEditable()) return;
+  if (act === "remove") {
+    if (b.dataset.confirm !== "1") { b.dataset.confirm = "1"; b.textContent = "確認移除"; return; }
+    trip.hotels = { ...H, searches: H.searches.filter(x => x.id !== b.dataset.gid) };
+    return persistTrip("已移除這組搜尋結果");
+  }
+  if (act === "choose") {
+    const g = H.searches.find(x => x.id === b.dataset.gid); const h = g?.hotels[+b.dataset.i]; if (!h) return;
+    const nights = nightsBetween(g.checkIn, g.checkOut);
+    const pick = { ...h, id: `hp-${Date.now().toString(36)}`, checkIn: g.checkIn, checkOut: g.checkOut, nights,
+      priceTotal: h.pricePerNightTwd && nights ? h.pricePerNightTwd * nights : null, booked: false };
+    // 與新選擇日期重疊的住宿換成這一間；沒有日期時同一地點的換掉
+    const overlap = x => g.checkIn && g.checkOut && x.checkIn && x.checkOut ? x.checkIn < g.checkOut && g.checkIn < x.checkOut : x.area === h.area;
+    trip.hotels = normalizeHotels({ ...H, picks: [...H.picks.filter(x => !overlap(x)), pick] });
+    applyHotelsToPlan(trip);
+    if (await persistTrip("已選定住宿，每天的住宿與預算已更新")) $("#hotels").scrollIntoView({ block: "start" });
+    return;
+  }
+  if (act === "unpick") {
+    trip.hotels = { ...H, picks: H.picks.filter(x => x.id !== b.dataset.id) };
+    applyHotelsToPlan(trip);
+    return persistTrip("已取消選擇");
+  }
+  if (act === "booked") {
+    trip.hotels = { ...H, picks: H.picks.map(x => x.id === b.dataset.id ? { ...x, booked: !x.booked } : x) };
+    return persistTrip(H.picks.find(x => x.id === b.dataset.id)?.booked ? "已改為尚未訂房" : "已標示為已訂房");
+  }
+  if (act === "conf") {
+    store.set(`rb.hotelconf.${trip.id}.${b.dataset.id}`, ($(`#htConf-${b.dataset.id}`)?.value || "").trim());
+    return toast("訂房確認碼已存在這台電腦");
+  }
 });
 
 /* ---------- 下載與列印 ---------- */
