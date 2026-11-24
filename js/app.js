@@ -1201,6 +1201,35 @@ $("#book").addEventListener("submit", async e => {
  * 選定後寫回每天的「今晚住宿」與預算的住宿金額。訂房確認碼只存在這台電腦。
  */
 const HOTEL_LEVELS = ["經濟", "舒適", "精品", "奢華"];
+/** 網路評比：每個網站一筆，滿分只接受 5、10、100；舊格式 rating＋ratingNote 自動轉換。與後端 hotels.js 相同規則 */
+function normalizeRatings(x) {
+  const list = Array.isArray(x?.ratings) ? x.ratings.slice() : [];
+  if (!list.length && +x?.rating > 0) {
+    const note = String(x?.ratingNote || "");
+    const outOf = /5\s*分制|\/\s*5\b|5 分滿分/.test(note) || +x.rating <= 5 ? 5 : 10;
+    list.push({ site: note.replace(/\s*\d+\s*分制.*$/, "").trim() || "網路評分", score: x.rating, outOf });
+  }
+  const seen = new Set(), out = [];
+  for (const r of list) {
+    const site = String(r?.site || "").trim().slice(0, 30), outOf = +r?.outOf, score = Math.round((+r?.score || 0) * 10) / 10;
+    if (!site || ![5, 10, 100].includes(outOf) || !(score > 0 && score <= outOf) || seen.has(site.toLowerCase())) continue;
+    seen.add(site.toLowerCase());
+    const reviews = Math.round(+r?.reviews || 0);
+    out.push({ site, score, outOf, reviews: reviews > 0 && reviews < 10000000 ? reviews : null });
+    if (out.length >= 3) break;
+  }
+  return out;
+}
+/** 換算成 5 分制的平均分數（依評論數加權；沒有評論數的以 1 計），用於星星與排序 */
+function avgStars(h) {
+  if (!h.ratings?.length) return null;
+  let sum = 0, w = 0;
+  for (const r of h.ratings) { const wt = Math.max(1, Math.log10((r.reviews || 1) + 1)); sum += r.score / r.outOf * 5 * wt; w += wt; }
+  return Math.round(sum / w * 10) / 10;
+}
+const starsHtml = v => `<span class="stars" style="--v:${Math.max(0, Math.min(5, v))}" role="img" aria-label="${v} 顆星（滿分 5）"><span aria-hidden="true">★★★★★</span></span>`;
+const CLASS_NAMES = ["", "一", "二", "三", "四", "五"];
+
 function normalizeHotel(x) {
   const name = String(x?.name || "").trim().slice(0, 80);
   if (!name) return null;
@@ -1210,7 +1239,7 @@ function normalizeHotel(x) {
     name, nameLocal: String(x?.nameLocal || "").trim().slice(0, 100), area: String(x?.area || "").slice(0, 40),
     access: String(x?.access || "").slice(0, 80), walkMin: int(x?.walkMin, 120),
     pricePerNightTwd: int(x?.pricePerNightTwd, 500000), rooms: int(x?.rooms, 10) || 1, roomNote: String(x?.roomNote || "").slice(0, 60),
-    rating: one(x?.rating, 10), ratingNote: String(x?.ratingNote || "").slice(0, 40),
+    starClass: int(x?.starClass, 5), ratings: normalizeRatings(x),
     highlights: String(x?.highlights || "").slice(0, 160), cautions: String(x?.cautions || "").slice(0, 160), source: safeUrl(x?.source),
   };
 }
@@ -1233,6 +1262,17 @@ function normalizeHotels(h) {
       booked: !!p?.booked };
   }).filter(Boolean).sort((a, b) => (a.checkIn || "").localeCompare(b.checkIn || ""));
   return { searches, picks };
+}
+
+/** 每組搜尋結果的排序方式（只在畫面上，不存檔）：""＝推薦順序、rating、price */
+const htSort = {};
+function sortHotels(g) {
+  const list = g.hotels.map((h, i) => ({ h, i }));
+  const mode = htSort[g.id] || "";
+  // 沒有評分或價格的排在最後
+  if (mode === "rating") list.sort((a, b) => (avgStars(b.h) ?? -1) - (avgStars(a.h) ?? -1) || a.i - b.i);
+  if (mode === "price") list.sort((a, b) => (a.h.pricePerNightTwd ?? Infinity) - (b.h.pricePerNightTwd ?? Infinity) || a.i - b.i);
+  return list;
 }
 
 /** 搜尋表單的內容：畫面重新產生時保留 */
@@ -1323,14 +1363,20 @@ function hotelsHtml(t) {
         ${edit ? `<button class="btn ghost" type="button" data-ht="requery" data-gid="${esc(g.id)}">重新搜尋</button><button class="btn ghost" type="button" data-ht="remove" data-gid="${esc(g.id)}">移除</button>` : ""}</div>
       ${g.note ? `<p class="lk-note">${esc(g.note)}</p>` : ""}
       ${g.sources.length ? `<details class="lk-sources"><summary>搜尋時參考的網頁（${g.sources.length}）</summary><ul>${g.sources.map(x => `<li><a href="${esc(x.uri)}" target="_blank" rel="noopener">${esc(x.title || x.uri)}</a></li>`).join("")}</ul></details>` : ""}
-      ${g.hotels.length ? `<ul class="ht-list">${g.hotels.map((h, i) => {
+      ${g.hotels.length > 1 ? `<div class="ht-sort" role="group" aria-label="排序">排序：${[["", "推薦順序"], ["rating", "評分高到低"], ["price", "價格低到高"]].map(([k, label]) =>
+          `<button class="chip" type="button" data-ht="sort" data-gid="${esc(g.id)}" data-sort="${k}" aria-pressed="${(htSort[g.id] || "") === k}">${label}</button>`).join("")}</div>` : ""}
+      ${g.hotels.length ? `<ul class="ht-list">${sortHotels(g).map(({ h, i }) => {
         const picked = pickedKey(g, h);
         return `<li class="ht-card${picked ? " picked" : ""}">
           <div class="ht-main">
             <div class="ht-name"><b>${esc(h.name)}</b>${h.nameLocal && h.nameLocal !== h.name ? ` <small>${esc(h.nameLocal)}</small>` : ""}</div>
             <div class="ht-meta">${[h.area, h.access, h.walkMin ? `步行約 ${h.walkMin} 分` : ""].filter(Boolean).map(esc).join("・")}</div>
             <div class="ht-price">${h.pricePerNightTwd ? `每晚約 <b class="mono">NT$ ${num(h.pricePerNightTwd)}</b>（全體${h.rooms > 1 ? `・${h.rooms} 間` : ""}）${n ? `・${n} 晚約 NT$ ${num(h.pricePerNightTwd * n)}` : ""}` : `<span class="lk-wait">價格未查到</span>`}
-              ${h.roomNote ? `<small>・${esc(h.roomNote)}</small>` : ""}${h.rating ? `<small>・評分 ${h.rating}${h.ratingNote ? `（${esc(h.ratingNote)}）` : ""}</small>` : ""}</div>
+              ${h.roomNote ? `<small>・${esc(h.roomNote)}</small>` : ""}</div>
+            ${`<div class="ht-rating">
+              ${h.ratings.length ? `${starsHtml(avgStars(h))}<b class="mono">${avgStars(h)}</b>
+                <small>${h.ratings.map(r => `${esc(r.site)} ${r.score}／${r.outOf}${r.reviews ? `（${num(r.reviews)} 則）` : ""}`).join("・")}</small>` : `<small class="lk-wait">沒有查到網路評分</small>`}
+              ${h.starClass ? `<span class="ht-class">${CLASS_NAMES[h.starClass]}星級飯店</span>` : ""}</div>`}
             ${h.highlights ? `<div class="ht-good">${esc(h.highlights)}</div>` : ""}
             ${h.cautions ? `<div class="ht-warn">注意：${esc(h.cautions)}</div>` : ""}
             <div class="lk-links">${h.source ? `<a href="${esc(h.source)}" target="_blank" rel="noopener">來源</a>` : `<span class="lk-nosrc">無來源</span>`}
@@ -1392,12 +1438,12 @@ function hotelPrompt(t, f) {
 1. 以「${f.area}」為中心，步行或搭車 20 分鐘內為主；walkMin 是步行到該地點或最近車站的分鐘數，access 寫最近的車站與步行時間。
 2. 涵蓋不同價位；有長輩或兒童時，優先列出有家庭房、電梯、離車站近的飯店。
 3. pricePerNightTwd 是這組旅伴「全體每晚」的參考價（新台幣整數，含稅），以這個日期或最接近日期在訂房網站、官網看到的價格為準；查不到填 0，不要估算。rooms 是需要幾間房，roomNote 寫房型。
-4. rating 照訂房網站或 Google 的原始分數填寫，ratingNote 寫來源與滿分；查不到填 0。
+4. ratings 列出網路評比，每個網站一筆（優先 Google、Booking.com、Agoda、TripAdvisor，最多 3 個）：site 網站名稱、score 原始分數、outOf 滿分（5 或 10）、reviews 評論數（查不到填 0）；只填實際查到的。starClass 是官方星級，沒有或查不到填 0。
 5. highlights 寫 1～2 句優點；cautions 寫需要注意的地方，沒有就留空。nameLocal 寫當地語言或英文正式名稱。
 6. 每間都附上實際查到資料的網頁網址（source）。不要編造飯店、價格或評分。
 
 直接在對話中回覆，不要建立 artifact 或檔案。最後只回覆一個 \`\`\`json 程式碼區塊，格式：
-{"hotels":[{"name":"","nameLocal":"","area":"","access":"","walkMin":0,"pricePerNightTwd":0,"rooms":1,"roomNote":"","rating":0,"ratingNote":"","highlights":"","cautions":"","source":"https://..."}],"note":""}`;
+{"hotels":[{"name":"","nameLocal":"","area":"","access":"","walkMin":0,"pricePerNightTwd":0,"rooms":1,"roomNote":"","starClass":0,"ratings":[{"site":"Google","score":0,"outOf":5,"reviews":0}],"highlights":"","cautions":"","source":"https://..."}],"note":""}`;
 }
 
 /** 新增或取代一組搜尋結果（同地點、同日期視為同一組） */
@@ -1460,6 +1506,7 @@ $("#book").addEventListener("click", async e => {
     htPending = f;
     return showPrompt(hotelPrompt(trip, f), `搜尋${f.area}附近的飯店`, "hotels");
   }
+  if (act === "sort") { htSort[b.dataset.gid] = b.dataset.sort; return show(trip, meta); }
   if (act === "requery") {
     const g = H.searches.find(x => x.id === b.dataset.gid); if (!g) return;
     const f = { ...htForm, area: g.area, checkIn: g.checkIn, checkOut: g.checkOut, id: g.id };
