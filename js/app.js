@@ -62,6 +62,7 @@ function normalize(d) {
   out.overview.passes = arr(out.overview.passes);
   out.flights = normalizeFlights(d.flights);
   out.hotels = normalizeHotels(d.hotels);
+  out.tickets = normalizeTickets(d.tickets);
   if (!out.dayPlans.length) throw new Error("沒有每日行程");
   return out;
 }
@@ -174,7 +175,7 @@ function render(t) {
       <p class="status" style="margin:10px 0 0">電話號碼可長按或點兩下選取複製。建議另外抄寫一份放在錢包。</p></div>
   </section>`;
 
-  $("#book").innerHTML = pass + overview + flightsHtml(t) + hotelsHtml(t) +
+  $("#book").innerHTML = pass + overview + flightsHtml(t) + hotelsHtml(t) + ticketsHtml(t) +
     `<section class="block" id="days"><h2>每日行程 <span class="eyebrow">Daily route</span></h2><nav class="daytabs" aria-label="跳到某一天">${tabs}</nav>${days}</section>` +
     budget + bookings + checklist + notes + emergency;
   updateProgress();
@@ -537,7 +538,7 @@ ${SCHEMA}`;
 let importMode = "trip";
 function showPrompt(text, title, mode = "trip") {
   importMode = mode;
-  $("label[for=importText]").textContent = { flights: "匯入 Claude 回覆的航班選項 JSON", airline: "匯入 Claude 回覆的當日航班 JSON（整段回覆貼上即可）", hotels: "匯入 Claude 回覆的飯店 JSON（整段回覆貼上即可）" }[mode] || "匯入 Claude 回覆的 JSON";
+  $("label[for=importText]").textContent = { flights: "匯入 Claude 回覆的航班選項 JSON", airline: "匯入 Claude 回覆的當日航班 JSON（整段回覆貼上即可）", hotels: "匯入 Claude 回覆的飯店 JSON（整段回覆貼上即可）", tickets: "匯入 Claude 回覆的門票 JSON（整段回覆貼上即可）" }[mode] || "匯入 Claude 回覆的 JSON";
   $("#promptTitle").textContent = title;
   $("#promptText").value = text;
   $("#promptPanel").hidden = false; $("#planner").hidden = true; $("#savedPanel").hidden = true;
@@ -595,6 +596,7 @@ async function importTrip(text) {
   if (importMode === "flights") return importFlights(text);
   if (importMode === "airline") return importAirline(text);
   if (importMode === "hotels") return importHotels(text);
+  if (importMode === "tickets") return importTickets(text);
   const st = $("#importStatus");
   try {
     const t = normalize(extractJson(text));
@@ -605,6 +607,7 @@ async function importTrip(text) {
     // Claude 的調整結果不一定帶回機票比較資料，沿用原本的
     if (refining && !t.flights.options.length && pendingBase.flights) t.flights = pendingBase.flights;
     if (refining && !t.hotels.searches.length && !t.hotels.picks.length && pendingBase.hotels) t.hotels = pendingBase.hotels;
+    if (refining && !t.tickets.items.length && pendingBase.tickets) t.tickets = pendingBase.tickets;
     const targetId = refining && pendingMeta && pendingMeta.source === "cloud" && pendingMeta.isOwner ? pendingMeta.id : undefined;
     if (pendingRequest) { t.request = pendingRequest; if (!t.people) t.people = (pendingRequest.adults + pendingRequest.seniors + pendingRequest.kids) || null; }
     pendingBase = null; pendingMeta = null; pendingRequest = null;
@@ -1544,6 +1547,279 @@ $("#book").addEventListener("click", async e => {
   if (act === "conf") {
     store.set(`rb.hotelconf.${trip.id}.${b.dataset.id}`, ($(`#htConf-${b.dataset.id}`)?.value || "").trim());
     return toast("訂房確認碼已存在這台電腦");
+  }
+});
+
+/* ---------- 門票：查詢行程中景點的門票、加入計畫、記錄購票 ----------
+ * 與機票、住宿相同的做法：在 Claude Flow 底下由後端（Gemini＋Google 搜尋）直接查詢，也可以改用 claude.ai。
+ * 加入計畫的門票會加總到預算的「門票與體驗」；需要預約的自動排進「預訂時程」。網站不代售門票。
+ */
+const TICKET_STATUS = {
+  required: { label: "必須預約", cls: "crit", rank: 0 },
+  recommended: { label: "建議預約", cls: "warn", rank: 1 },
+  onsite: { label: "現場購票", cls: "info", rank: 2 },
+  free: { label: "免費", cls: "ok", rank: 3 },
+};
+const TICKET_MAX = 8;
+function normalizeTicket(x) {
+  const name = String(x?.name || "").trim().slice(0, 60);
+  if (!name) return null;
+  const S = (v, m) => String(v || "").slice(0, m);
+  const status = TICKET_STATUS[x?.status] ? x.status : "onsite";
+  const types = (Array.isArray(x?.ticketTypes) ? x.ticketTypes : []).map(t => {
+    const price = Math.round((+t?.price || 0) * 100) / 100, currency = String(t?.currency || "").trim().toUpperCase(), label = S(t?.label, 20).trim();
+    return label && price >= 0 && price < 1e7 && /^[A-Z]{3}$/.test(currency) ? { label, price, currency } : null;
+  }).filter(Boolean).slice(0, 6);
+  const total = Math.round(+x?.partyTotalTwd || 0);
+  return {
+    name, nameLocal: S(x?.nameLocal, 80).trim(), status, date: /^\d{4}-\d{2}-\d{2}$/.test(x?.date || "") ? x.date : "", place: S(x?.place, 80),
+    ticketTypes: status === "free" ? [] : types, partyTotalTwd: status !== "free" && total > 0 && total <= 1e6 ? total : null, fxNote: S(x?.fxNote, 40),
+    openingHours: S(x?.openingHours, 80), closedDays: S(x?.closedDays, 60), timeSlot: x?.timeSlot === true, bookingWindow: S(x?.bookingWindow, 80),
+    channels: (Array.isArray(x?.channels) ? x.channels : []).map(c => ({ name: S(c?.name, 20).trim(), url: safeUrl(c?.url) })).filter(c => c.name && c.url).slice(0, 3),
+    tips: S(x?.tips, 160), cautions: S(x?.cautions, 160), source: safeUrl(x?.source), fetchedAt: S(x?.fetchedAt, 10),
+    include: !!x?.include, booked: !!(x?.include && x?.booked),
+  };
+}
+function normalizeTickets(tk) {
+  const seen = new Set();
+  const items = (Array.isArray(tk?.items) ? tk.items : []).map(normalizeTicket).filter(x => x && !seen.has(x.name) && seen.add(x.name)).slice(0, 30);
+  return { items, note: String(tk?.note || "").slice(0, 300),
+    sources: (Array.isArray(tk?.sources) ? tk.sources : []).slice(0, 15).map(x => ({ title: String(x?.title || "").slice(0, 120), uri: safeUrl(x?.uri) })).filter(x => x.uri) };
+}
+
+/** 行程中的景點（依日期），供勾選查詢 */
+function tripSights(t) {
+  const seen = new Set(), out = [];
+  t.dayPlans.forEach(p => p.items.forEach(it => {
+    if (it.type !== "sight") return;
+    const name = String(it.title || "").replace(/^(午餐|晚餐|早餐)[:：]/, "").trim();
+    if (!name || seen.has(name)) return;
+    seen.add(name);
+    out.push({ name, date: p.date || "", day: p.day, place: it.place || "" });
+  }));
+  return out;
+}
+let tkChecked = null, tkExtra = "", tkBusy = false;
+const canSearchTickets = () => !!(cloud && typeof cloud.searchTickets === "function") && flightEditable();
+document.addEventListener("change", e => {
+  if (e.target.matches?.("[data-tk-sight]") && tkChecked) { const n = e.target.dataset.tkSight; e.target.checked ? tkChecked.add(n) : tkChecked.delete(n); updateTicketCount(); }
+});
+document.addEventListener("input", e => { if (e.target.id === "tk-extra") { tkExtra = e.target.value; updateTicketCount(); } });
+function ticketQueryList(t) {
+  const sights = tripSights(t);
+  const picked = sights.filter(s => tkChecked.has(s.name));
+  const extra = tkExtra.split(/[,，、\n]/).map(s => s.trim()).filter(Boolean).map(name => ({ name, date: "", place: "" }));
+  const names = new Set();
+  return [...picked, ...extra].filter(x => !names.has(x.name) && names.add(x.name));
+}
+function updateTicketCount() {
+  const n = trip ? ticketQueryList(trip).length : 0;
+  const el = $("#tkCount"); if (el) { el.textContent = n > TICKET_MAX ? `已選 ${n} 個，一次最多 ${TICKET_MAX} 個` : `已選 ${n} 個`; el.className = n > TICKET_MAX ? "status err" : "status"; }
+}
+const dayLabel = (t, date) => { const p = t.dayPlans.find(x => x.date === date); return p ? `Day ${p.day}・${fmtDate(date)}` : (date ? fmtDate(date) : ""); };
+const priceText = types => types.map(x => `${x.label} ${x.currency === "JPY" ? "¥" : x.currency + " "}${num(x.price)}`).join("・");
+
+function ticketsHtml(t) {
+  const T = t.tickets, edit = flightEditable();
+  const sights = tripSights(t);
+  const done = new Set(T.items.map(x => x.name));
+  if (!tkChecked || tkChecked.tripId !== t.id) {
+    tkChecked = new Set(sights.filter(s => !done.has(s.name)).slice(0, TICKET_MAX).map(s => s.name)); tkChecked.tripId = t.id; tkExtra = "";
+  }
+  const inc = T.items.filter(x => x.include);
+  const incTotal = inc.reduce((s, x) => s + (x.partyTotalTwd || 0), 0);
+  const needBook = inc.filter(x => x.status === "required" || x.status === "recommended");
+  const summary = T.items.length ? `<div class="tk-summary">
+      <span>已加入計畫 <b>${inc.length}</b> 項${inc.length ? `・合計約 <b class="mono">NT$ ${num(incTotal)}</b>${inc.some(x => !x.partyTotalTwd && x.status !== "free") ? "（部分未查到價格）" : ""}` : ""}</span>
+      ${needBook.length ? `<span>需要預約 <b>${needBook.length}</b> 項・已購票 <b>${needBook.filter(x => x.booked).length}</b> 項</span>` : ""}
+    </div>` : "";
+
+  const picker = edit ? `
+    <div class="tk-picker">
+      <span class="lbl">行程中的景點（勾選要查詢的，一次最多 ${TICKET_MAX} 個）</span>
+      ${sights.length ? `<ul class="tk-sights">${sights.map((s, i) => `<li><label><input type="checkbox" data-tk-sight="${esc(s.name)}"${tkChecked.has(s.name) ? " checked" : ""}>
+        <span>${esc(s.name)}</span><small>${esc(dayLabel(t, s.date) || `Day ${s.day}`)}</small>${done.has(s.name) ? `<span class="tk-done">已查</span>` : ""}</label></li>`).join("")}</ul>`
+        : `<p class="status">行程中沒有標示為景點的項目，可以在下方自行輸入。</p>`}
+      <div class="field"><label for="tk-extra">其他景點（用逗號分隔）</label><input id="tk-extra" value="${esc(tkExtra)}" placeholder="例：環球影城、海遊館"></div>
+      <div class="actions">
+        ${canSearchTickets()
+          ? `<button class="btn primary" type="button" data-tk="search"${tkBusy ? " disabled" : ""}>${tkBusy ? "查詢中…" : "查詢門票"}</button>
+             <button class="btn ghost" type="button" data-tk="query">改用 claude.ai 查詢</button>`
+          : `<button class="btn primary" type="button" data-tk="query">查詢門票</button>`}
+        <span id="tkCount" class="status">已選 ${ticketQueryList(t).length} 個</span>
+      </div>
+      ${tkBusy ? `<p class="status lk-busy" role="status">正在上網查詢門票資訊，約需 15～50 秒，請稍候…</p>` : ""}
+    </div>` : (meta.source === "sample" ? `<p class="status">範例行程不能修改。建立或匯入自己的行程後，就能查詢與記錄門票。</p>` : "");
+
+  const items = [...T.items].sort((a, b) => TICKET_STATUS[a.status].rank - TICKET_STATUS[b.status].rank || (a.date || "9").localeCompare(b.date || "9"));
+  const cards = items.length ? `<ul class="tk-list">${items.map(x => {
+    const st = TICKET_STATUS[x.status];
+    const conf = edit && x.booked ? store.get(`rb.ticketconf.${t.id}.${x.name}`, "") : "";
+    return `<li class="tk-card${x.include ? " included" : ""}">
+      <div class="tk-head"><span class="tk-badge ${st.cls}">${st.label}</span><b>${esc(x.name)}</b>${x.nameLocal && x.nameLocal !== x.name ? ` <small>${esc(x.nameLocal)}</small>` : ""}
+        ${x.date ? `<small class="tk-day">${esc(dayLabel(t, x.date))}</small>` : ""}</div>
+      ${x.status !== "free" ? `<div class="tk-price">${x.ticketTypes.length ? esc(priceText(x.ticketTypes)) : `<span class="lk-wait">價格未查到</span>`}
+        ${x.partyTotalTwd ? `<span>・全體約 <b class="mono">NT$ ${num(x.partyTotalTwd)}</b>${x.fxNote ? `<small>（${esc(x.fxNote)}）</small>` : ""}</span>` : ""}</div>` : ""}
+      ${x.bookingWindow || x.timeSlot ? `<div class="tk-window">${x.bookingWindow ? `開賣：${esc(x.bookingWindow)}` : ""}${x.timeSlot ? `${x.bookingWindow ? "・" : ""}需預約入場時段` : ""}</div>` : ""}
+      ${x.openingHours || x.closedDays ? `<div class="tk-meta">${[x.openingHours && `營業 ${x.openingHours}`, x.closedDays && `公休 ${x.closedDays}`].filter(Boolean).map(esc).join("・")}</div>` : ""}
+      ${x.tips ? `<div class="ht-good">${esc(x.tips)}</div>` : ""}
+      ${x.cautions ? `<div class="ht-warn">注意：${esc(x.cautions)}</div>` : ""}
+      <div class="lk-links">${x.channels.map(c => `<a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.name)}</a>`).join("")}
+        ${x.source ? `<a href="${esc(x.source)}" target="_blank" rel="noopener">來源</a>` : `<span class="lk-nosrc">無來源</span>`}
+        <small>查詢日期 ${esc(x.fetchedAt || "—")}</small></div>
+      ${edit ? `<div class="tk-acts">
+        ${x.status === "free" ? `<span class="status">免費參觀，不需購票</span>` : `<button class="btn ${x.include ? "primary" : ""}" type="button" data-tk="include" data-name="${esc(x.name)}">${x.include ? "已加入計畫" : "加入計畫"}</button>`}
+        ${x.include ? `<button class="btn" type="button" data-tk="booked" data-name="${esc(x.name)}">${x.booked ? "改為尚未購票" : "標示已購票"}</button>` : ""}
+        <button class="btn ghost" type="button" data-tk="remove" data-name="${esc(x.name)}">移除</button></div>
+        ${x.booked ? `<div class="fl-pnr"><label>購票確認碼（只存在這台電腦，不會分享出去）</label>
+          <div class="fl-pnr-row"><input data-tk-conf="${esc(x.name)}" maxlength="40" autocomplete="off" value="${esc(conf)}"><button class="btn" type="button" data-tk="conf" data-name="${esc(x.name)}">儲存</button></div></div>` : ""}`
+        : (x.include ? `<div class="tk-acts"><span class="badge-chosen">${x.booked ? "已購票" : "已加入計畫"}</span></div>` : "")}
+    </li>`;
+  }).join("")}</ul>` : "";
+
+  return `
+  <section class="block" id="tickets">
+    <h2>門票 <span class="eyebrow">Tickets</span></h2>
+    <div class="panel">
+      ${summary}${picker}
+      ${T.note ? `<p class="lk-note">${esc(T.note)}</p>` : ""}
+      ${T.sources.length ? `<details class="lk-sources"><summary>查詢時參考的網頁（${T.sources.length}）</summary><ul>${T.sources.map(x => `<li><a href="${esc(x.uri)}" target="_blank" rel="noopener">${esc(x.title || x.uri)}</a></li>`).join("")}</ul></details>` : ""}
+      ${cards}
+      ${items.length ? `<p class="status">價格、營業時間與開賣規則是從景點官網與購票平台查到的參考值，購票前請到購買管道確認。網站不代售門票。</p>` : ""}
+    </div>
+  </section>`;
+}
+
+/** 加入計畫的門票寫回預算（門票與體驗）與預訂時程（需要預約的） */
+function applyTicketsToPlan(t) {
+  const inc = t.tickets.items.filter(x => x.include);
+  const priced = inc.filter(x => x.partyTotalTwd);
+  if (priced.length) {
+    const total = priced.reduce((s, x) => s + x.partyTotalTwd, 0);
+    const note = priced.map(x => x.name).join("、") + (inc.length > priced.length ? `；另有 ${inc.length - priced.length} 項未查到價格` : "");
+    const b = t.budget.items.find(x => /門票|體驗|入場/.test(x.category));
+    if (b) { b.amount = total; b.note = note; } else t.budget.items.push({ category: "門票與體驗", amount: total, note });
+  }
+  // 預訂時程：先移除之前由門票自動產生的，再依目前計畫重新加入
+  t.bookings = t.bookings.filter(b => !String(b.auto || "").startsWith("ticket:"));
+  const manual = t.bookings.map(b => String(b.what || ""));
+  for (const x of inc.filter(x => x.status === "required" || x.status === "recommended")) {
+    // 原本的預訂時程已經提到這個景點（例如規劃時就寫好的），不重複加入
+    const core = x.name.split(/[（(]/)[0].trim();
+    if (core && manual.some(w => w.includes(core))) continue;
+    t.bookings.push({
+      auto: "ticket:" + x.name,
+      when: x.bookingWindow || (x.status === "required" ? "出發前（開賣時間未查到）" : "出發前"),
+      what: `${x.name} 門票${x.date ? `（${fmtDate(x.date)} 入場）` : ""}${x.timeSlot ? "，需選入場時段" : ""}`,
+      note: [x.booked ? "已購票" : "", x.channels.map(c => c.name).join("、")].filter(Boolean).join("；"),
+    });
+  }
+}
+
+function ticketPrompt(t, list) {
+  const p = partyOf(t);
+  const who = [p.adults && `成人 ${p.adults}`, p.seniors && `長輩（65 歲以上）${p.seniors}`, p.kids && `兒童 ${p.kids}${p.kidAges ? `（${p.kidAges} 歲）` : ""}`].filter(Boolean).join("、");
+  return `請使用網路搜尋，查詢以下${t.dest.city ? `${t.dest.city}的` : ""}景點門票資訊，旅客為${who}：
+${list.map((a, i) => `${i + 1}. ${a.name}${a.place ? `（${a.place}）` : ""}：${a.date || "日期未定"}`).join("\n")}
+
+每個景點回傳一筆，name 照上面的名稱填寫：
+1. status：必須事先預約或購票填 "required"；可現場購買但建議先買填 "recommended"；現場購票填 "onsite"；免費填 "free"。
+2. ticketTypes：各票種與當地貨幣原價（price 數字、currency 幣別代碼）。免費給空陣列。
+3. partyTotalTwd：依旅客組成計算全體合計並換算新台幣整數，fxNote 寫匯率；查不到填 0。
+4. openingHours、closedDays；查詢日期當天公休或特殊休館時寫在 cautions。
+5. timeSlot：需要預約入場時段填 true；bookingWindow 寫開賣規則（例如「入場日前 1 個月的 10:00 開賣」）。
+6. channels：購票管道最多 3 個（官網、Klook、KKday 等）附網址；tips、cautions；source 是主要資料網址。
+不要編造價格、時間或網址，查不到的留空或填 0。
+
+直接在對話中回覆，不要建立 artifact 或檔案。最後只回覆一個 \`\`\`json 程式碼區塊，格式：
+{"attractions":[{"name":"","nameLocal":"","status":"required","ticketTypes":[{"label":"成人","price":0,"currency":"JPY"}],"partyTotalTwd":0,"fxNote":"","openingHours":"","closedDays":"","timeSlot":false,"bookingWindow":"","channels":[{"name":"官網","url":"https://..."}],"tips":"","cautions":"","source":"https://..."}],"note":""}`;
+}
+
+/** 把查詢結果併入行程：同名景點以新結果為準，保留原本的計畫與購票狀態 */
+function mergeTicketResults(list, req, extra) {
+  const byName = new Map(req.map(a => [a.name, a]));
+  const old = new Map(trip.tickets.items.map(x => [x.name, x]));
+  const fresh = list.map(x => {
+    const q = byName.get(x.name) || {};
+    const prev = old.get(x.name);
+    return { ...x, date: q.date || prev?.date || "", place: q.place || "", fetchedAt: extra.fetchedAt, include: prev?.include || false, booked: prev?.booked || false };
+  });
+  const names = new Set(fresh.map(x => x.name));
+  trip.tickets = normalizeTickets({ items: [...fresh, ...trip.tickets.items.filter(x => !names.has(x.name))], note: extra.note || trip.tickets.note, sources: extra.sources || trip.tickets.sources });
+  applyTicketsToPlan(trip);
+  return fresh.length;
+}
+
+let tkPending = null;
+async function importTickets(text) {
+  const st = $("#importStatus");
+  try {
+    const raw = String(text || "").trim();
+    const fences = [...raw.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+    const body = (fences.length ? fences[fences.length - 1][1] : raw).trim();
+    let data;
+    try { data = JSON.parse(body); } catch { data = extractJson(body); }
+    const list = Array.isArray(data) ? data : data?.attractions;
+    if (!Array.isArray(list)) throw new Error("找不到 attractions 景點清單");
+    const n = mergeTicketResults(list, tkPending || [], { fetchedAt: new Date().toISOString().slice(0, 10), note: data?.note, sources: [] });
+    for (const a of tkPending || []) tkChecked?.delete(a.name);
+    tkPending = null; tkExtra = "";
+    $("#promptPanel").hidden = true;
+    if (await persistTrip(`已加入 ${n} 個景點的門票資訊`)) $("#tickets").scrollIntoView({ block: "start" });
+  } catch (err) {
+    st.className = "status err";
+    st.textContent = err instanceof SyntaxError
+      ? "JSON 格式有誤，常見原因是回覆被截斷。請請 Claude「繼續」或重新產生，再貼一次完整內容。"
+      : "無法匯入：" + err.message + "。請確認貼上的是 Claude 回覆中的 JSON。";
+  }
+}
+
+async function directTicketSearch(list) {
+  if (tkBusy) return;
+  const t = trip;
+  tkBusy = true; show(t, meta);
+  let r;
+  try { r = await cloud.searchTickets({ attractions: list, city: t.dest.city || "", ...partyOf(t) }); }
+  catch { r = { available: false, reason: "查詢失敗，請稍後再試。" }; }
+  tkBusy = false;
+  if (trip !== t) return;
+  if (!r || !r.available) { show(trip, meta); toast(r?.reason || "查詢失敗，請稍後再試。"); return; }
+  for (const a of list) tkChecked.delete(a.name);
+  tkExtra = "";
+  const n = mergeTicketResults(r.attractions || [], list, { fetchedAt: r.fetchedAt, note: r.note, sources: r.sources });
+  if (await persistTrip(n ? `已查到 ${n} 個景點的門票資訊` : "沒有查到門票資訊")) $("#tickets").scrollIntoView({ block: "start" });
+}
+
+$("#book").addEventListener("click", async e => {
+  const b = e.target.closest("[data-tk]"); if (!b || !trip) return;
+  const act = b.dataset.tk, name = b.dataset.name;
+  if (act === "search" || act === "query") {
+    const list = ticketQueryList(trip);
+    if (!list.length) { toast("請先勾選或輸入景點"); return; }
+    if (list.length > TICKET_MAX) { toast(`一次最多查詢 ${TICKET_MAX} 個景點，請減少勾選`); return; }
+    if (act === "search") return directTicketSearch(list);
+    tkPending = list;
+    return showPrompt(ticketPrompt(trip, list), "查詢景點門票", "tickets");
+  }
+  if (!flightEditable()) return;
+  const T = trip.tickets;
+  if (act === "include" || act === "booked") {
+    trip.tickets = { ...T, items: T.items.map(x => x.name !== name ? x
+      : act === "include" ? { ...x, include: !x.include, booked: x.include ? false : x.booked } : { ...x, booked: !x.booked }) };
+    applyTicketsToPlan(trip);
+    const x = trip.tickets.items.find(x => x.name === name);
+    return persistTrip(act === "include" ? (x.include ? "已加入計畫，預算與預訂時程已更新" : "已從計畫移除") : (x.booked ? "已標示已購票" : "已改為尚未購票"));
+  }
+  if (act === "remove") {
+    if (b.dataset.confirm !== "1") { b.dataset.confirm = "1"; b.textContent = "確認移除"; return; }
+    trip.tickets = { ...T, items: T.items.filter(x => x.name !== name) };
+    applyTicketsToPlan(trip);
+    return persistTrip("已移除");
+  }
+  if (act === "conf") {
+    const input = [...document.querySelectorAll("[data-tk-conf]")].find(i => i.dataset.tkConf === name);
+    store.set(`rb.ticketconf.${trip.id}.${name}`, (input?.value || "").trim());
+    return toast("購票確認碼已存在這台電腦");
   }
 });
 
