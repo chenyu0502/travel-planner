@@ -31,10 +31,15 @@
     </details>
     <button class="btn" id="btnPrint" type="button"><span>列印<span class="long"> / PDF</span></span></button>
     <details class="menu" id="styleMenu">
-      <summary class="btn style-btn" aria-label="版面風格" title="版面風格">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="13.5" cy="6.5" r="1.5" fill="currentColor" stroke="none"/><circle cx="17.5" cy="10.5" r="1.5" fill="currentColor" stroke="none"/><circle cx="8.5" cy="7.5" r="1.5" fill="currentColor" stroke="none"/><circle cx="6.5" cy="12.5" r="1.5" fill="currentColor" stroke="none"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.9 0 1.7-.7 1.7-1.7 0-.4-.2-.8-.4-1.1-.3-.3-.4-.7-.4-1.1 0-.9.7-1.7 1.7-1.7h2c3 0 5.5-2.5 5.5-5.5C22 6 17.5 2 12 2z"/></svg>
+      <summary class="btn style-btn" aria-label="設定" title="設定">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       </summary>
-      <div class="menu-list style-list" id="styleList" role="menu" aria-label="版面風格"></div>
+      <div class="menu-list style-list" role="menu" aria-label="設定">
+        <p class="menu-h">版面風格</p>
+        <div id="styleList"></div>
+        <p class="menu-h">AI 查詢</p>
+        <button class="btn" id="btnKey" type="button" role="menuitem">Gemini 金鑰<small id="keyBadge"></small></button>
+      </div>
     </details>
   </div>
   <nav class="secnav" aria-label="章節">
@@ -115,6 +120,28 @@
     <h2>我的行程</h2>
     <p class="lead" id="savedLead"></p>
     <div class="saved" id="savedList"></div>
+  </section>
+
+  <section class="planner" id="keyPanel" hidden>
+    <h2>Gemini 金鑰</h2>
+    <p class="lead">機票、住宿、門票、交通與餐廳的「直接查詢」由 Google Gemini 搭配 Google 搜尋完成。預設使用網站共用的金鑰；共用額度用完或想自己掌握用量時，可以改用你自己的免費金鑰。</p>
+    <ol class="key-steps">
+      <li>到 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> 用 Google 帳號登入，按「Create API key」建立金鑰（免費方案即可）。</li>
+      <li>複製金鑰（通常以 AIza 開頭）貼到下面，按「測試」確認可用後再「儲存」。</li>
+    </ol>
+    <p class="key-note">金鑰只存在這個瀏覽器，依 Claude Flow 帳號分開保存，不會存進行程或分享給親友。查詢時經由網站後端轉給 Google，後端不記錄。在公用電腦使用後請按「清除」。</p>
+    <div class="key-row">
+      <input id="keyInput" type="password" autocomplete="off" spellcheck="false" placeholder="AIza…" aria-label="Gemini 金鑰">
+      <label class="key-show"><input type="checkbox" id="keyShow"> 顯示</label>
+    </div>
+    <div class="actions">
+      <button class="btn" type="button" id="btnKeyTest">測試</button>
+      <button class="btn primary" type="button" id="btnKeySave">儲存</button>
+      <button class="btn" type="button" id="btnKeyClear">清除</button>
+      <button class="btn" type="button" id="btnKeyClose">關閉</button>
+    </div>
+    <p class="status" id="keyStatus" role="status"></p>
+    <p class="key-current" id="keyCurrent"></p>
   </section>
 
   <div id="book"></div>

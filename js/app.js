@@ -379,7 +379,7 @@ const rowHtml = (title, sub, buttons) => `<div class="row"><span><b>${esc(title)
   <span class="row-actions">${buttons}</span></div>`;
 async function showSaved() {
   const box = $("#savedList");
-  $("#savedPanel").hidden = false; $("#planner").hidden = true; $("#promptPanel").hidden = true;
+  $("#savedPanel").hidden = false; $("#planner").hidden = true; $("#promptPanel").hidden = true; $("#keyPanel").hidden = true;
   $("#savedLead").textContent = cloud
     ? "雲端的行程登入 Claude Flow 後在任何裝置都看得到，也可以複製連結分享給親友。只存在這台電腦的行程，可以按「存到雲端」。"
     : "行程儲存在這個瀏覽器中，換裝置或清除網站資料後不會保留。需要長期保存請用「下載 JSON」，之後可以再匯入。";
@@ -458,7 +458,7 @@ function chips(group, list) {
 chips("style", STYLES); chips("interests", INTERESTS);
 const picked = g => [...document.querySelectorAll(`[data-group="${g}"] .chip[aria-pressed="true"]`)].map(c => c.textContent);
 
-function openPlanner() { $("#planner").hidden = false; $("#savedPanel").hidden = true; $("#planner").scrollIntoView({ block: "start" }); $("#fDest").focus({ preventScroll: true }); }
+function openPlanner() { $("#planner").hidden = false; $("#savedPanel").hidden = true; $("#keyPanel").hidden = true; $("#planner").scrollIntoView({ block: "start" }); $("#fDest").focus({ preventScroll: true }); }
 $("#btnNew").addEventListener("click", openPlanner);
 document.addEventListener("click", e => { if (e.target.closest("[data-open-planner]")) openPlanner(); });
 $("#btnCancelPlan").addEventListener("click", () => { $("#planner").hidden = true; });
@@ -543,7 +543,7 @@ function showPrompt(text, title, mode = "trip") {
   $("label[for=importText]").textContent = { flights: "匯入 Claude 回覆的航班選項 JSON", airline: "匯入 Claude 回覆的當日航班 JSON（整段回覆貼上即可）", hotels: "匯入 Claude 回覆的飯店 JSON（整段回覆貼上即可）", tickets: "匯入 Claude 回覆的門票 JSON（整段回覆貼上即可）", transport: "匯入 Claude 回覆的交通票券 JSON（整段回覆貼上即可）", dining: "匯入 Claude 回覆的餐廳 JSON（整段回覆貼上即可）" }[mode] || "匯入 Claude 回覆的 JSON";
   $("#promptTitle").textContent = title;
   $("#promptText").value = text;
-  $("#promptPanel").hidden = false; $("#planner").hidden = true; $("#savedPanel").hidden = true;
+  $("#promptPanel").hidden = false; $("#planner").hidden = true; $("#savedPanel").hidden = true; $("#keyPanel").hidden = true;
   $("#importText").value = ""; $("#importStatus").textContent = "";
   $("#promptPanel").scrollIntoView({ block: "start" });
 }
@@ -1028,7 +1028,7 @@ async function directSearch(airline) {
   lkBusy = airline; show(t, meta);
   let r;
   try {
-    r = await cloud.searchFlights({ airline, from: t.origin.code, to: t.dest.code, outDate: t.startDate || "", backDate: tripEnd(t) || "" });
+    r = await keyed("searchFlights", { airline, from: t.origin.code, to: t.dest.code, outDate: t.startDate || "", backDate: tripEnd(t) || "" });
   } catch { r = { available: false, reason: "查詢失敗，請稍後再試。" }; }
   lkBusy = "";
   if (trip !== t) return; // 查詢期間切換了行程，結果不套用
@@ -1493,7 +1493,7 @@ async function directHotelSearch(f, gid) {
   htBusy = f.area; show(t, meta);
   let r;
   try {
-    r = await cloud.searchHotels({ area: f.area, city: t.dest.city || "", checkIn: f.checkIn || "", checkOut: f.checkOut || "",
+    r = await keyed("searchHotels", { area: f.area, city: t.dest.city || "", checkIn: f.checkIn || "", checkOut: f.checkOut || "",
       ...p, level: f.level || "", budgetPerNight: +f.budget || 0, notes: f.notes || "" });
   } catch { r = { available: false, reason: "搜尋失敗，請稍後再試。" }; }
   htBusy = "";
@@ -1785,7 +1785,7 @@ async function directTicketSearch(list) {
   const t = trip;
   tkBusy = true; show(t, meta);
   let r;
-  try { r = await cloud.searchTickets({ attractions: list, city: t.dest.city || "", ...partyOf(t) }); }
+  try { r = await keyed("searchTickets", { attractions: list, city: t.dest.city || "", ...partyOf(t) }); }
   catch { r = { available: false, reason: "查詢失敗，請稍後再試。" }; }
   tkBusy = false;
   if (trip !== t) return;
@@ -2031,7 +2031,7 @@ async function directTransportSearch() {
   trBusy = true; show(t, meta);
   let r;
   try {
-    r = await cloud.searchTransport({ legs: tripLegs(t), city: t.dest.city || "", ...partyOf(t), knownPasses: t.overview.passes.filter(x => !x.auto).map(x => x.name) });
+    r = await keyed("searchTransport", { legs: tripLegs(t), city: t.dest.city || "", ...partyOf(t), knownPasses: t.overview.passes.filter(x => !x.auto).map(x => x.name) });
   } catch { r = { available: false, reason: "分析失敗，請稍後再試。" }; }
   trBusy = false;
   if (trip !== t) return;
@@ -2344,7 +2344,7 @@ async function directDiningSearch(f, gid) {
   rsBusy = f.area; show(t, meta);
   let r;
   try {
-    r = await cloud.searchRestaurants({ area: f.area, city: t.dest.city || "", date: f.date || "", time: f.time || "", meal: f.meal || "",
+    r = await keyed("searchRestaurants", { area: f.area, city: t.dest.city || "", date: f.date || "", time: f.time || "", meal: f.meal || "",
       cuisine: f.cuisine || "", budgetPerPersonTwd: +f.budget || 0, diet: f.diet || "", notes: f.notes || "", ...partyOf(t) });
   } catch { r = { available: false, reason: "搜尋失敗，請稍後再試。" }; }
   rsBusy = "";
@@ -2462,6 +2462,72 @@ $("#styleList").addEventListener("click", e => {
 });
 renderStyleList();
 
+/* ---------- 使用者自己的 Gemini 金鑰 ---------- */
+// 只存在這個瀏覽器（依 Claude Flow 帳號分開），不放進行程資料；查詢時由雲端介面放在請求標頭送給後端
+const KEY_RE = /^[A-Za-z0-9_-]{20,200}$/;
+const keyStoreName = () => cloud && cloud.user && cloud.user.uid ? "rb.geminiKey." + cloud.user.uid : "";
+function userKey() {
+  const n = keyStoreName(); if (!n) return "";
+  const k = store.get(n, "");
+  return typeof k === "string" && KEY_RE.test(k) ? k : "";
+}
+const maskKey = k => k.slice(0, 4) + "…" + k.slice(-4);
+/** 呼叫雲端查詢；有自己的金鑰就一併帶上 */
+function keyed(name, params) {
+  const k = userKey();
+  return k ? cloud[name](params, { geminiKey: k }) : cloud[name](params);
+}
+function renderKeyState() {
+  const k = userKey();
+  $("#keyBadge").textContent = k ? "自己的金鑰" : "網站共用";
+  $("#keyCurrent").textContent = !cloud ? "" : k ? `目前使用：你的金鑰（${maskKey(k)}）` : "目前使用：網站共用的金鑰";
+}
+function keyStatus(msg, bad) { const el = $("#keyStatus"); el.textContent = msg; el.classList.toggle("bad", !!bad); }
+function showKeyPanel() {
+  $("#keyPanel").hidden = false; $("#planner").hidden = true; $("#savedPanel").hidden = true; $("#promptPanel").hidden = true;
+  const ok = !!(cloud && typeof cloud.checkGeminiKey === "function");
+  ["#keyInput", "#keyShow", "#btnKeyTest", "#btnKeySave", "#btnKeyClear"].forEach(s => { $(s).disabled = !ok; });
+  $("#keyInput").value = "";
+  keyStatus(ok ? "" : (cloud ? "Claude Flow 尚未更新到支援自己的金鑰，請稍後再試。" : "直接查詢只在 Claude Flow 的 /travel/ 登入後提供，這裡無法設定金鑰。"), !ok);
+  renderKeyState();
+  $("#keyPanel").scrollIntoView({ block: "start" });
+  if (ok) $("#keyInput").focus({ preventScroll: true });
+}
+function readKeyInput() {
+  const k = $("#keyInput").value.trim();
+  if (!k) { keyStatus("請先貼上金鑰。", true); return ""; }
+  if (!KEY_RE.test(k)) { keyStatus("金鑰格式不正確：應為 20～200 個英數字、底線或連字號，通常以 AIza 開頭。", true); return ""; }
+  return k;
+}
+let keyBusy = false;
+async function testKey(k) {
+  keyBusy = true; keyStatus("測試中…");
+  let r;
+  try { r = await cloud.checkGeminiKey(k); } catch { r = { ok: false, reason: "測試失敗，請稍後再試。" }; }
+  keyBusy = false;
+  if (r.ok) keyStatus(`金鑰可用：可使用 ${r.models} 個 Gemini 模型${r.hasDefault === false ? "（沒有網站預設的模型，會改用其他可用模型）" : ""}。搜尋功能是否可用，要實際查詢一次才能確認。`);
+  else keyStatus(r.reason || "金鑰無法使用。", true);
+  return r.ok;
+}
+$("#btnKey").addEventListener("click", () => { $("#styleMenu").open = false; showKeyPanel(); });
+$("#btnKeyClose").addEventListener("click", () => { $("#keyPanel").hidden = true; });
+$("#keyShow").addEventListener("change", e => { $("#keyInput").type = e.target.checked ? "text" : "password"; });
+$("#btnKeyTest").addEventListener("click", async () => { if (keyBusy) return; const k = readKeyInput(); if (k) await testKey(k); });
+$("#btnKeySave").addEventListener("click", async () => {
+  if (keyBusy) return;
+  const k = readKeyInput(); if (!k) return;
+  if (!(await testKey(k))) return;
+  store.set(keyStoreName(), k);
+  $("#keyInput").value = ""; $("#keyShow").checked = false; $("#keyInput").type = "password";
+  renderKeyState(); toast("已儲存，之後的直接查詢會使用你的金鑰");
+});
+$("#btnKeyClear").addEventListener("click", () => {
+  const n = keyStoreName(); if (!n) return;
+  try { localStorage.removeItem(n); } catch {}
+  $("#keyInput").value = ""; keyStatus("已清除，之後改用網站共用的金鑰。"); renderKeyState();
+});
+renderKeyState();
+
 /* ---------- 啟動 ---------- */
 $("#appVersion").textContent = "v" + window.RB_VERSION;
 const underClaudeFlow = location.pathname.startsWith("/travel/") || !!document.getElementById("cf-gate-style");
@@ -2493,6 +2559,7 @@ function openLastLocal() {
   // 登入檢查要等登入狀態與使用者資料，給足時間；逾時就以本機模式繼續
   cloud = await waitForCloud(30000);
   if (!cloud) { toast("無法連線到 Claude Flow，行程只會存在這台電腦"); return; }
+  renderKeyState();
   if (fromHash) { if (!(await openCloudTrip(fromHash))) openLastLocal(); }
   else if (last.startsWith("cloud:")) { if (!(await openCloudTrip(last.slice(6)))) openSample(); }
   else show(trip, meta); // 重新整理分享列（本機行程顯示「存到雲端」）

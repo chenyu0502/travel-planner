@@ -469,3 +469,16 @@ label.btn{user-select:none}
   }
   :root[data-style] body{background-image:none}
 }
+
+/* 設定選單與 Gemini 金鑰 */
+.menu-h{margin:6px 8px 2px;font-size:12px;color:var(--muted);letter-spacing:.05em}
+#btnKey{display:flex;justify-content:space-between;gap:12px;width:100%}
+#btnKey small{color:var(--muted);font-size:12px}
+.key-steps{margin:0 0 10px;padding-left:22px;line-height:1.7}
+.key-note{font-size:13px;color:var(--muted);margin:0 0 12px}
+.key-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.key-row input[type=password],.key-row input[type=text]{flex:1 1 260px;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.key-show{display:flex;gap:4px;align-items:center;font-size:14px;white-space:nowrap}
+.key-current{margin:8px 0 0;font-weight:600}
+#keyStatus.bad{color:var(--crit)}
+#styleList{display:flex;flex-direction:column;gap:2px}
