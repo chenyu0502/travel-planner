@@ -63,6 +63,7 @@ function normalize(d) {
   out.flights = normalizeFlights(d.flights);
   out.hotels = normalizeHotels(d.hotels);
   out.tickets = normalizeTickets(d.tickets);
+  out.transport = normalizeTransport(d.transport);
   if (!out.dayPlans.length) throw new Error("沒有每日行程");
   return out;
 }
@@ -175,7 +176,7 @@ function render(t) {
       <p class="status" style="margin:10px 0 0">電話號碼可長按或點兩下選取複製。建議另外抄寫一份放在錢包。</p></div>
   </section>`;
 
-  $("#book").innerHTML = pass + overview + flightsHtml(t) + hotelsHtml(t) + ticketsHtml(t) +
+  $("#book").innerHTML = pass + overview + flightsHtml(t) + hotelsHtml(t) + ticketsHtml(t) + transportHtml(t) +
     `<section class="block" id="days"><h2>每日行程 <span class="eyebrow">Daily route</span></h2><nav class="daytabs" aria-label="跳到某一天">${tabs}</nav>${days}</section>` +
     budget + bookings + checklist + notes + emergency;
   updateProgress();
@@ -538,7 +539,7 @@ ${SCHEMA}`;
 let importMode = "trip";
 function showPrompt(text, title, mode = "trip") {
   importMode = mode;
-  $("label[for=importText]").textContent = { flights: "匯入 Claude 回覆的航班選項 JSON", airline: "匯入 Claude 回覆的當日航班 JSON（整段回覆貼上即可）", hotels: "匯入 Claude 回覆的飯店 JSON（整段回覆貼上即可）", tickets: "匯入 Claude 回覆的門票 JSON（整段回覆貼上即可）" }[mode] || "匯入 Claude 回覆的 JSON";
+  $("label[for=importText]").textContent = { flights: "匯入 Claude 回覆的航班選項 JSON", airline: "匯入 Claude 回覆的當日航班 JSON（整段回覆貼上即可）", hotels: "匯入 Claude 回覆的飯店 JSON（整段回覆貼上即可）", tickets: "匯入 Claude 回覆的門票 JSON（整段回覆貼上即可）", transport: "匯入 Claude 回覆的交通票券 JSON（整段回覆貼上即可）" }[mode] || "匯入 Claude 回覆的 JSON";
   $("#promptTitle").textContent = title;
   $("#promptText").value = text;
   $("#promptPanel").hidden = false; $("#planner").hidden = true; $("#savedPanel").hidden = true;
@@ -597,6 +598,7 @@ async function importTrip(text) {
   if (importMode === "airline") return importAirline(text);
   if (importMode === "hotels") return importHotels(text);
   if (importMode === "tickets") return importTickets(text);
+  if (importMode === "transport") return importTransport(text);
   const st = $("#importStatus");
   try {
     const t = normalize(extractJson(text));
@@ -608,6 +610,7 @@ async function importTrip(text) {
     if (refining && !t.flights.options.length && pendingBase.flights) t.flights = pendingBase.flights;
     if (refining && !t.hotels.searches.length && !t.hotels.picks.length && pendingBase.hotels) t.hotels = pendingBase.hotels;
     if (refining && !t.tickets.items.length && pendingBase.tickets) t.tickets = pendingBase.tickets;
+    if (refining && !t.transport.passes.length && pendingBase.transport) t.transport = pendingBase.transport;
     const targetId = refining && pendingMeta && pendingMeta.source === "cloud" && pendingMeta.isOwner ? pendingMeta.id : undefined;
     if (pendingRequest) { t.request = pendingRequest; if (!t.people) t.people = (pendingRequest.adults + pendingRequest.seniors + pendingRequest.kids) || null; }
     pendingBase = null; pendingMeta = null; pendingRequest = null;
@@ -1820,6 +1823,244 @@ $("#book").addEventListener("click", async e => {
     const input = [...document.querySelectorAll("[data-tk-conf]")].find(i => i.dataset.tkConf === name);
     store.set(`rb.ticketconf.${trip.id}.${name}`, (input?.value || "").trim());
     return toast("購票確認碼已存在這台電腦");
+  }
+});
+
+/* ---------- 交通票券：依行程移動段分析周遊券、IC 卡、機場交通、需劃位的車票 ----------
+ * 與門票相同的做法：在 Claude Flow 底下由後端（Gemini＋Google 搜尋）直接分析，也可以改用 claude.ai。
+ * 加入計畫的票券另列預算「交通票券」（不改動原本的「交通」）、需要預約的排進預訂時程、並列在總覽的交通策略。
+ */
+const PASS_TYPES = { pass: "周遊券", ic: "IC 卡", airport: "機場交通", reserved: "需劃位車票", single: "單買" };
+const PASS_VERDICT = { recommended: { label: "推薦", cls: "ok", rank: 0 }, optional: { label: "可考慮", cls: "info", rank: 1 }, not_needed: { label: "不需要", cls: "mute", rank: 2 } };
+function normalizePassItem(x) {
+  const name = String(x?.name || "").trim().slice(0, 60);
+  if (!name) return null;
+  const S = (v, m) => String(v || "").slice(0, m);
+  const total = Math.round(+x?.partyTotalTwd || 0);
+  return {
+    name, nameLocal: S(x?.nameLocal, 80).trim(),
+    type: PASS_TYPES[x?.type] ? x.type : "pass", verdict: PASS_VERDICT[x?.verdict] ? x.verdict : "optional",
+    coverage: S(x?.coverage, 120), validity: S(x?.validity, 40),
+    useDays: [...new Set((Array.isArray(x?.useDays) ? x.useDays : []).map(d => Math.round(+d)).filter(d => d >= 1 && d <= 60))].sort((a, b) => a - b),
+    priceTypes: (Array.isArray(x?.priceTypes) ? x.priceTypes : []).map(t => {
+      const price = Math.round((+t?.price || 0) * 100) / 100, currency = String(t?.currency || "").trim().toUpperCase(), label = S(t?.label, 20).trim();
+      return label && price >= 0 && price < 1e7 && /^[A-Z]{3}$/.test(currency) ? { label, price, currency } : null;
+    }).filter(Boolean).slice(0, 6),
+    partyTotalTwd: total > 0 && total <= 1e6 ? total : null, fxNote: S(x?.fxNote, 40), savingsNote: S(x?.savingsNote, 160),
+    buyWhere: S(x?.buyWhere, 120), needReservation: x?.needReservation === true, bookingWindow: S(x?.bookingWindow, 80),
+    channels: (Array.isArray(x?.channels) ? x.channels : []).map(c => ({ name: S(c?.name, 20).trim(), url: safeUrl(c?.url) })).filter(c => c.name && c.url).slice(0, 3),
+    tips: S(x?.tips, 160), cautions: S(x?.cautions, 160), source: safeUrl(x?.source),
+    include: !!x?.include, booked: !!(x?.include && x?.booked),
+  };
+}
+function normalizeTransport(tr) {
+  const seen = new Set();
+  const total = Math.round(+tr?.strategyTotalTwd || 0);
+  return {
+    strategy: String(tr?.strategy || "").slice(0, 400), strategyTotalTwd: total > 0 && total <= 2e6 ? total : null,
+    passes: (Array.isArray(tr?.passes) ? tr.passes : []).map(normalizePassItem).filter(x => x && !seen.has(x.name) && seen.add(x.name)).slice(0, 12),
+    note: String(tr?.note || "").slice(0, 300), fetchedAt: String(tr?.fetchedAt || "").slice(0, 10),
+    sources: (Array.isArray(tr?.sources) ? tr.sources : []).slice(0, 15).map(x => ({ title: String(x?.title || "").slice(0, 120), uri: safeUrl(x?.uri) })).filter(x => x.uri),
+  };
+}
+
+/** 行程中的移動段（不含飛機），依天數排列 */
+function tripLegs(t) {
+  const out = [];
+  t.dayPlans.forEach(p => p.items.forEach(it => {
+    if (it.type !== "move" || it.flight || /航空|飛機|班機/.test(`${it.mode || ""}${it.title || ""}`)) return;
+    out.push({ day: p.day, date: p.date || "", from: it.from || "", to: it.to || "", mode: MODE[it.mode] || it.mode || "", title: it.title || "" });
+  }));
+  return out.slice(0, 40);
+}
+let trBusy = false;
+const canSearchTransport = () => !!(cloud && typeof cloud.searchTransport === "function") && flightEditable();
+
+function transportHtml(t) {
+  const TR = t.transport, edit = flightEditable();
+  const legs = tripLegs(t);
+  const byDay = {};
+  legs.forEach(l => (byDay[l.day] ||= []).push(l));
+  const legList = legs.length ? `<details class="tr-legs"><summary>行程中的移動段（${legs.length} 段）</summary><ul>${Object.entries(byDay).map(([d, ls]) =>
+      `<li><b>Day ${esc(d)}</b> ${ls.map(l => esc(l.from && l.to ? `${l.from} → ${l.to}` : l.title) + (l.mode ? `<small>（${esc(l.mode)}）</small>` : "")).join("、")}</li>`).join("")}</ul></details>`
+    : `<p class="status">行程中沒有移動段，無法分析交通票券。</p>`;
+
+  const tools = edit ? `
+    ${legList}
+    <div class="actions">
+      ${legs.length ? (canSearchTransport()
+        ? `<button class="btn primary" type="button" data-tr="search"${trBusy ? " disabled" : ""}>${trBusy ? "分析中…" : TR.passes.length ? "重新分析交通票券" : "分析交通票券"}</button>
+           <button class="btn ghost" type="button" data-tr="query">改用 claude.ai 查詢</button>`
+        : `<button class="btn primary" type="button" data-tr="query">分析交通票券</button>`) : ""}
+    </div>
+    ${trBusy ? `<p class="status lk-busy" role="status">正在上網查詢交通票券並與單買比較，約需 15～50 秒，請稍候…</p>` : ""}`
+    : (meta.source === "sample" ? `<p class="status">範例行程不能修改。建立或匯入自己的行程後，就能分析交通票券。</p>` : "");
+
+  const inc = TR.passes.filter(x => x.include);
+  const strategy = TR.strategy || TR.passes.length ? `<div class="tr-strategy">
+      <span class="eyebrow">建議策略${TR.fetchedAt ? `・${esc(TR.fetchedAt)} 分析` : ""}</span>
+      ${TR.strategy ? `<p>${esc(TR.strategy)}</p>` : ""}
+      <p class="status">${TR.strategyTotalTwd ? `推薦組合全體約 <b class="mono">NT$ ${num(TR.strategyTotalTwd)}</b>・` : ""}已加入計畫 <b>${inc.length}</b> 項${inc.length ? `，合計約 <b class="mono">NT$ ${num(inc.reduce((s, x) => s + (x.partyTotalTwd || 0), 0))}</b>` : ""}</p>
+    </div>` : "";
+
+  const items = [...TR.passes].sort((a, b) => PASS_VERDICT[a.verdict].rank - PASS_VERDICT[b.verdict].rank);
+  const cards = items.length ? `<ul class="tk-list">${items.map(x => {
+    const v = PASS_VERDICT[x.verdict];
+    const conf = edit && x.booked ? store.get(`rb.passconf.${t.id}.${x.name}`, "") : "";
+    return `<li class="tk-card${x.include ? " included" : ""}${x.verdict === "not_needed" ? " tr-off" : ""}">
+      <div class="tk-head"><span class="tk-badge ${v.cls}">${v.label}</span><span class="tr-type">${PASS_TYPES[x.type]}</span><b>${esc(x.name)}</b>${x.nameLocal && x.nameLocal !== x.name ? ` <small>${esc(x.nameLocal)}</small>` : ""}</div>
+      ${x.coverage || x.validity || x.useDays.length ? `<div class="tk-meta">${[x.coverage, x.validity && `效期 ${x.validity}`, x.useDays.length && `使用 ${x.useDays.map(d => "Day " + d).join("、")}`].filter(Boolean).map(esc).join("・")}</div>` : ""}
+      <div class="tk-price">${x.priceTypes.length ? esc(priceText(x.priceTypes)) + (x.partyTotalTwd ? "・" : "") : (x.partyTotalTwd ? "" : `<span class="lk-wait">價格未查到</span>`)}
+        ${x.partyTotalTwd ? `<span>全體約 <b class="mono">NT$ ${num(x.partyTotalTwd)}</b>${x.fxNote ? `<small>（${esc(x.fxNote)}）</small>` : ""}</span>` : ""}</div>
+      ${x.savingsNote ? `<div class="tr-save">${esc(x.savingsNote)}</div>` : ""}
+      ${x.buyWhere ? `<div class="tk-meta">購買：${esc(x.buyWhere)}</div>` : ""}
+      ${x.needReservation || x.bookingWindow ? `<div class="tk-window">${x.needReservation ? "需事先預約或劃位" : ""}${x.needReservation && x.bookingWindow ? "・" : ""}${esc(x.bookingWindow)}</div>` : ""}
+      ${x.tips ? `<div class="ht-good">${esc(x.tips)}</div>` : ""}
+      ${x.cautions ? `<div class="ht-warn">注意：${esc(x.cautions)}</div>` : ""}
+      <div class="lk-links">${x.channels.map(c => `<a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.name)}</a>`).join("")}
+        ${x.source ? `<a href="${esc(x.source)}" target="_blank" rel="noopener">來源</a>` : `<span class="lk-nosrc">無來源</span>`}</div>
+      ${edit ? `<div class="tk-acts">
+        <button class="btn ${x.include ? "primary" : ""}" type="button" data-tr="include" data-name="${esc(x.name)}">${x.include ? "已加入計畫" : "加入計畫"}</button>
+        ${x.include ? `<button class="btn" type="button" data-tr="booked" data-name="${esc(x.name)}">${x.booked ? "改為尚未購買" : "標示已購買"}</button>` : ""}
+        <button class="btn ghost" type="button" data-tr="remove" data-name="${esc(x.name)}">移除</button></div>
+        ${x.booked ? `<div class="fl-pnr"><label>購買或預約確認碼（只存在這台電腦，不會分享出去）</label>
+          <div class="fl-pnr-row"><input data-tr-conf="${esc(x.name)}" maxlength="40" autocomplete="off" value="${esc(conf)}"><button class="btn" type="button" data-tr="conf" data-name="${esc(x.name)}">儲存</button></div></div>` : ""}`
+        : (x.include ? `<div class="tk-acts"><span class="badge-chosen">${x.booked ? "已購買" : "已加入計畫"}</span></div>` : "")}
+    </li>`;
+  }).join("")}</ul>` : "";
+
+  return `
+  <section class="block" id="transport">
+    <h2>交通票券 <span class="eyebrow">Passes</span></h2>
+    <div class="panel">
+      ${strategy}${tools}
+      ${TR.note ? `<p class="lk-note">${esc(TR.note)}</p>` : ""}
+      ${TR.sources.length ? `<details class="lk-sources"><summary>分析時參考的網頁（${TR.sources.length}）</summary><ul>${TR.sources.map(x => `<li><a href="${esc(x.uri)}" target="_blank" rel="noopener">${esc(x.title || x.uri)}</a></li>`).join("")}</ul></details>` : ""}
+      ${cards}
+      ${items.length ? `<p class="status">票價與規定是從官方與購票平台查到的參考值；加入計畫的票券另列預算「交通票券」，原本的「交通」預算若已包含這些費用，請自行調整。網站不代售票券。</p>` : ""}
+    </div>
+  </section>`;
+}
+
+/** 加入計畫的票券寫回：預算「交通票券」、預訂時程（需預約的）、總覽的交通策略 */
+function applyTransportToPlan(t) {
+  const inc = t.transport.passes.filter(x => x.include);
+  const priced = inc.filter(x => x.partyTotalTwd);
+  const bi = t.budget.items.findIndex(x => x.category === "交通票券");
+  if (priced.length) {
+    const item = { category: "交通票券", amount: priced.reduce((s, x) => s + x.partyTotalTwd, 0),
+      note: priced.map(x => x.name).join("、") + (inc.length > priced.length ? `；另有 ${inc.length - priced.length} 項未查到價格` : "") };
+    if (bi >= 0) t.budget.items[bi] = item; else t.budget.items.push(item);
+  } else if (bi >= 0) t.budget.items.splice(bi, 1);
+
+  const core = n => n.split(/[（(]/)[0].trim();
+  t.bookings = t.bookings.filter(b => !String(b.auto || "").startsWith("transport:"));
+  const manualB = t.bookings.map(b => String(b.what || ""));
+  for (const x of inc.filter(x => x.needReservation || x.bookingWindow)) {
+    if (manualB.some(w => w.includes(core(x.name)))) continue;
+    t.bookings.push({ auto: "transport:" + x.name, when: x.bookingWindow || "出發前", what: `${x.name}${x.needReservation ? "（需事先預約或劃位）" : ""}`,
+      note: [x.booked ? "已購買" : "", x.buyWhere || x.channels.map(c => c.name).join("、")].filter(Boolean).join("；") });
+  }
+
+  const passes = t.overview.passes.filter(p => !String(p.auto || "").startsWith("transport:"));
+  const manualP = passes.map(p => String(p.name || ""));
+  for (const x of inc) {
+    if (manualP.some(n => n.includes(core(x.name)) || core(x.name).includes(n))) continue;
+    passes.push({ auto: "transport:" + x.name, name: x.name, note: [x.coverage, x.validity, x.useDays.length && `用於 ${x.useDays.map(d => "Day " + d).join("、")}`].filter(Boolean).join("；") });
+  }
+  t.overview = { ...t.overview, passes };
+}
+
+function transportPrompt(t, legs) {
+  const p = partyOf(t);
+  const who = [p.adults && `成人 ${p.adults}`, p.seniors && `長輩（65 歲以上）${p.seniors}`, p.kids && `兒童 ${p.kids}${p.kidAges ? `（${p.kidAges} 歲）` : ""}`].filter(Boolean).join("、");
+  const known = t.overview.passes.filter(x => !x.auto).map(x => x.name);
+  return `請使用網路搜尋，依以下${t.dest.city || ""}行程的移動段，分析該買哪些交通票券，旅客為${who}：
+${legs.map(l => `- Day ${l.day}${l.date ? `（${l.date}）` : ""}：${l.from && l.to ? `${l.from} → ${l.to}` : l.title}${l.mode ? `（${l.mode}）` : ""}`).join("\n")}
+${known.length ? `\n行程原本規劃的票券：${known.join("、")}（請一併評估是否划算）\n` : ""}
+查詢可用的周遊券、一日券、IC 卡、機場交通優惠票、需劃位的特急或觀光列車，依實際移動段與單買比較，列出最多 8 項：
+- type：pass（周遊券、一日券）、ic（IC 卡）、airport（機場交通）、reserved（需事先劃位的車票）、single（建議單買）。
+- verdict：recommended（建議買）、optional（看情況）、not_needed（不划算或用不到，在 savingsNote 說明）。
+- coverage 範圍、validity 效期、useDays 用得到的天數陣列；priceTypes 各票種當地貨幣原價；partyTotalTwd 全體合計新台幣與 fxNote 匯率（IC 卡填建議儲值總額）。
+- savingsNote 與單買比較省或多多少及依據；buyWhere 購買地點與方式；needReservation、bookingWindow；channels 購買管道與網址（最多 3 個）；tips、cautions、source。
+- strategy 用 2～3 句話寫整體建議；strategyTotalTwd 推薦組合全體合計。
+不要編造票券、價格或網址，查不到的留空或填 0。
+
+直接在對話中回覆，不要建立 artifact 或檔案。最後只回覆一個 \`\`\`json 程式碼區塊，格式：
+{"strategy":"","strategyTotalTwd":0,"passes":[{"name":"","nameLocal":"","type":"pass","verdict":"recommended","coverage":"","validity":"","useDays":[1],"priceTypes":[{"label":"成人","price":0,"currency":"JPY"}],"partyTotalTwd":0,"fxNote":"","savingsNote":"","buyWhere":"","needReservation":false,"bookingWindow":"","channels":[{"name":"官網","url":"https://..."}],"tips":"","cautions":"","source":"https://..."}],"note":""}`;
+}
+
+/** 分析結果取代原本的清單，同名票券保留計畫與購買狀態 */
+function setTransportResult(r) {
+  const old = new Map(trip.transport.passes.map(x => [x.name, x]));
+  const passes = (Array.isArray(r.passes) ? r.passes : []).map(x => {
+    const prev = old.get(String(x?.name || "").trim());
+    return { ...x, include: prev?.include || false, booked: prev?.booked || false };
+  });
+  trip.transport = normalizeTransport({ ...r, passes });
+  applyTransportToPlan(trip);
+  return trip.transport.passes.length;
+}
+
+async function importTransport(text) {
+  const st = $("#importStatus");
+  try {
+    const raw = String(text || "").trim();
+    const fences = [...raw.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+    const body = (fences.length ? fences[fences.length - 1][1] : raw).trim();
+    let data;
+    try { data = JSON.parse(body); } catch { data = extractJson(body); }
+    if (!Array.isArray(data?.passes)) throw new Error("找不到 passes 票券清單");
+    const n = setTransportResult({ ...data, sources: [], fetchedAt: new Date().toISOString().slice(0, 10) });
+    $("#promptPanel").hidden = true;
+    if (await persistTrip(`已分析 ${n} 種交通票券`)) $("#transport").scrollIntoView({ block: "start" });
+  } catch (err) {
+    st.className = "status err";
+    st.textContent = err instanceof SyntaxError
+      ? "JSON 格式有誤，常見原因是回覆被截斷。請請 Claude「繼續」或重新產生，再貼一次完整內容。"
+      : "無法匯入：" + err.message + "。請確認貼上的是 Claude 回覆中的 JSON。";
+  }
+}
+
+async function directTransportSearch() {
+  if (trBusy) return;
+  const t = trip;
+  trBusy = true; show(t, meta);
+  let r;
+  try {
+    r = await cloud.searchTransport({ legs: tripLegs(t), city: t.dest.city || "", ...partyOf(t), knownPasses: t.overview.passes.filter(x => !x.auto).map(x => x.name) });
+  } catch { r = { available: false, reason: "分析失敗，請稍後再試。" }; }
+  trBusy = false;
+  if (trip !== t) return;
+  if (!r || !r.available) { show(trip, meta); toast(r?.reason || "分析失敗，請稍後再試。"); return; }
+  const n = setTransportResult(r);
+  if (await persistTrip(n ? `已分析 ${n} 種交通票券` : "沒有找到適合的交通票券")) $("#transport").scrollIntoView({ block: "start" });
+}
+
+$("#book").addEventListener("click", async e => {
+  const b = e.target.closest("[data-tr]"); if (!b || !trip) return;
+  const act = b.dataset.tr, name = b.dataset.name;
+  if (act === "search") return directTransportSearch();
+  if (act === "query") return showPrompt(transportPrompt(trip, tripLegs(trip)), "分析交通票券", "transport");
+  if (!flightEditable()) return;
+  const TR = trip.transport;
+  if (act === "include" || act === "booked") {
+    trip.transport = { ...TR, passes: TR.passes.map(x => x.name !== name ? x
+      : act === "include" ? { ...x, include: !x.include, booked: x.include ? false : x.booked } : { ...x, booked: !x.booked }) };
+    applyTransportToPlan(trip);
+    const x = trip.transport.passes.find(x => x.name === name);
+    return persistTrip(act === "include" ? (x.include ? "已加入計畫，預算、預訂時程與總覽已更新" : "已從計畫移除") : (x.booked ? "已標示已購買" : "已改為尚未購買"));
+  }
+  if (act === "remove") {
+    if (b.dataset.confirm !== "1") { b.dataset.confirm = "1"; b.textContent = "確認移除"; return; }
+    trip.transport = { ...TR, passes: TR.passes.filter(x => x.name !== name) };
+    applyTransportToPlan(trip);
+    return persistTrip("已移除");
+  }
+  if (act === "conf") {
+    const input = [...document.querySelectorAll("[data-tr-conf]")].find(i => i.dataset.trConf === name);
+    store.set(`rb.passconf.${trip.id}.${name}`, (input?.value || "").trim());
+    return toast("確認碼已存在這台電腦");
   }
 });
 
