@@ -64,6 +64,7 @@ function normalize(d) {
   out.hotels = normalizeHotels(d.hotels);
   out.tickets = normalizeTickets(d.tickets);
   out.transport = normalizeTransport(d.transport);
+  out.dining = normalizeDining(d.dining);
   if (!out.dayPlans.length) throw new Error("沒有每日行程");
   return out;
 }
@@ -176,7 +177,7 @@ function render(t) {
       <p class="status" style="margin:10px 0 0">電話號碼可長按或點兩下選取複製。建議另外抄寫一份放在錢包。</p></div>
   </section>`;
 
-  $("#book").innerHTML = pass + overview + flightsHtml(t) + hotelsHtml(t) + ticketsHtml(t) + transportHtml(t) +
+  $("#book").innerHTML = pass + overview + flightsHtml(t) + hotelsHtml(t) + ticketsHtml(t) + transportHtml(t) + diningHtml(t) +
     `<section class="block" id="days"><h2>每日行程 <span class="eyebrow">Daily route</span></h2><nav class="daytabs" aria-label="跳到某一天">${tabs}</nav>${days}</section>` +
     budget + bookings + checklist + notes + emergency;
   updateProgress();
@@ -539,7 +540,7 @@ ${SCHEMA}`;
 let importMode = "trip";
 function showPrompt(text, title, mode = "trip") {
   importMode = mode;
-  $("label[for=importText]").textContent = { flights: "匯入 Claude 回覆的航班選項 JSON", airline: "匯入 Claude 回覆的當日航班 JSON（整段回覆貼上即可）", hotels: "匯入 Claude 回覆的飯店 JSON（整段回覆貼上即可）", tickets: "匯入 Claude 回覆的門票 JSON（整段回覆貼上即可）", transport: "匯入 Claude 回覆的交通票券 JSON（整段回覆貼上即可）" }[mode] || "匯入 Claude 回覆的 JSON";
+  $("label[for=importText]").textContent = { flights: "匯入 Claude 回覆的航班選項 JSON", airline: "匯入 Claude 回覆的當日航班 JSON（整段回覆貼上即可）", hotels: "匯入 Claude 回覆的飯店 JSON（整段回覆貼上即可）", tickets: "匯入 Claude 回覆的門票 JSON（整段回覆貼上即可）", transport: "匯入 Claude 回覆的交通票券 JSON（整段回覆貼上即可）", dining: "匯入 Claude 回覆的餐廳 JSON（整段回覆貼上即可）" }[mode] || "匯入 Claude 回覆的 JSON";
   $("#promptTitle").textContent = title;
   $("#promptText").value = text;
   $("#promptPanel").hidden = false; $("#planner").hidden = true; $("#savedPanel").hidden = true;
@@ -599,6 +600,7 @@ async function importTrip(text) {
   if (importMode === "hotels") return importHotels(text);
   if (importMode === "tickets") return importTickets(text);
   if (importMode === "transport") return importTransport(text);
+  if (importMode === "dining") return importDining(text);
   const st = $("#importStatus");
   try {
     const t = normalize(extractJson(text));
@@ -611,6 +613,7 @@ async function importTrip(text) {
     if (refining && !t.hotels.searches.length && !t.hotels.picks.length && pendingBase.hotels) t.hotels = pendingBase.hotels;
     if (refining && !t.tickets.items.length && pendingBase.tickets) t.tickets = pendingBase.tickets;
     if (refining && !t.transport.passes.length && pendingBase.transport) t.transport = pendingBase.transport;
+    if (refining && !t.dining.searches.length && !t.dining.picks.length && pendingBase.dining) t.dining = pendingBase.dining;
     const targetId = refining && pendingMeta && pendingMeta.source === "cloud" && pendingMeta.isOwner ? pendingMeta.id : undefined;
     if (pendingRequest) { t.request = pendingRequest; if (!t.people) t.people = (pendingRequest.adults + pendingRequest.seniors + pendingRequest.kids) || null; }
     pendingBase = null; pendingMeta = null; pendingRequest = null;
@@ -2061,6 +2064,354 @@ $("#book").addEventListener("click", async e => {
     const input = [...document.querySelectorAll("[data-tr-conf]")].find(i => i.dataset.trConf === name);
     store.set(`rb.passconf.${trip.id}.${name}`, (input?.value || "").trim());
     return toast("確認碼已存在這台電腦");
+  }
+});
+
+/* ---------- 餐廳：為行程中的某一餐找餐廳、比較、選定、記錄訂位 ----------
+ * 與住宿相同的做法：在 Claude Flow 底下由後端（Gemini＋Google 搜尋）直接查詢，也可以改用 claude.ai。
+ * 選定後改寫每日行程中那一餐（名稱、地點、價位、訂位提醒），需要訂位的排進預訂時程。
+ * 不改動預算的「餐飲」（那是全部餐費的估算），只在區塊內顯示已選餐廳的合計。網站不代為訂位。
+ */
+const MEALS = ["早餐", "午餐", "下午茶", "晚餐", "宵夜"];
+const RSV = {
+  required: { label: "必須訂位", cls: "crit" }, recommended: { label: "建議訂位", cls: "warn" },
+  walkin: { label: "不需訂位", cls: "info" }, not_accepted: { label: "不接受訂位", cls: "mute" },
+};
+function normalizeRestaurant(x) {
+  const name = String(x?.name || "").trim().slice(0, 80);
+  if (!name) return null;
+  const S = (v, m) => String(v || "").slice(0, m);
+  const int = (v, max) => { const n = Math.round(+v || 0); return n > 0 && n <= max ? n : null; };
+  let priceMin = int(x?.priceMin, 1e7), priceMax = int(x?.priceMax, 1e7);
+  if (priceMin && priceMax && priceMin > priceMax) [priceMin, priceMax] = [priceMax, priceMin];
+  const currency = String(x?.currency || "").trim().toUpperCase();
+  return {
+    name, nameLocal: S(x?.nameLocal, 100).trim(), cuisine: S(x?.cuisine, 30), area: S(x?.area, 40), access: S(x?.access, 80), walkMin: int(x?.walkMin, 120),
+    priceMin, priceMax, currency: /^[A-Z]{3}$/.test(currency) && (priceMin || priceMax) ? currency : "",
+    partyEstimateTwd: int(x?.partyEstimateTwd, 1e6), fxNote: S(x?.fxNote, 40), ratings: normalizeRatings(x),
+    reservation: RSV[x?.reservation] ? x.reservation : "walkin", reservationHow: S(x?.reservationHow, 80), bookingWindow: S(x?.bookingWindow, 80),
+    openingHours: S(x?.openingHours, 80), closedDays: S(x?.closedDays, 60), signature: S(x?.signature, 80),
+    familyNote: S(x?.familyNote, 120), dietNote: S(x?.dietNote, 120), tips: S(x?.tips, 160), cautions: S(x?.cautions, 160),
+    channels: (Array.isArray(x?.channels) ? x.channels : []).map(c => ({ name: S(c?.name, 20).trim(), url: safeUrl(c?.url) })).filter(c => c.name && c.url).slice(0, 3),
+    source: safeUrl(x?.source),
+  };
+}
+function normalizeDining(d) {
+  const arr = v => Array.isArray(v) ? v : [];
+  const D = v => /^\d{4}-\d{2}-\d{2}$/.test(v || "") ? v : "";
+  const T = v => /^\d{1,2}:\d{2}$/.test(v || "") ? v.padStart(5, "0") : "";
+  const M = v => MEALS.includes(v) ? v : "";
+  const searches = arr(d?.searches).slice(0, 12).map((g, i) => ({
+    id: String(g?.id || `ds-${Date.now().toString(36)}-${i}`), area: String(g?.area || "").slice(0, 60), date: D(g?.date), time: T(g?.time), meal: M(g?.meal),
+    slot: String(g?.slot || "").slice(0, 20), fetchedAt: String(g?.fetchedAt || "").slice(0, 10), note: String(g?.note || "").slice(0, 300),
+    sources: arr(g?.sources).slice(0, 15).map(x => ({ title: String(x?.title || "").slice(0, 120), uri: safeUrl(x?.uri) })).filter(x => x.uri),
+    restaurants: arr(g?.restaurants).map(normalizeRestaurant).filter(Boolean).slice(0, 10),
+  })).filter(g => g.area);
+  const picks = arr(d?.picks).slice(0, 30).map((p, i) => {
+    const r = normalizeRestaurant(p); if (!r) return null;
+    return { ...r, id: String(p?.id || `dp-${Date.now().toString(36)}-${i}`), date: D(p?.date), time: T(p?.time), meal: M(p?.meal), slot: String(p?.slot || "").slice(0, 20), booked: !!p?.booked };
+  }).filter(Boolean).sort((a, b) => `${a.date}${a.time}`.localeCompare(`${b.date}${b.time}`));
+  return { searches, picks };
+}
+
+/** 依時間判斷是哪一餐（標題已寫明時以標題為準） */
+function mealOf(title, time) {
+  const m = MEALS.find(x => String(title || "").startsWith(x));
+  if (m) return m;
+  const h = +String(time || "").split(":")[0];
+  if (!time) return "";
+  return h < 10 ? "早餐" : h < 15 ? "午餐" : h < 17 ? "下午茶" : h < 22 ? "晚餐" : "宵夜";
+}
+/** 行程中的用餐時段；slot 以「第幾天｜時間」識別，選定餐廳改寫標題後仍對得上 */
+function tripMeals(t) {
+  const out = [];
+  t.dayPlans.forEach(p => p.items.forEach(it => {
+    if (it.type !== "food") return;
+    out.push({ slot: `${p.day}|${it.time || ""}`, day: p.day, date: p.date || "", time: it.time || "", meal: mealOf(it.title, it.time),
+      title: it.title || "", place: it.place || "", area: p.area || "" });
+  }));
+  return out;
+}
+let rsForm = null, rsBusy = "";
+const rsSort = {};
+const canSearchDining = () => !!(cloud && typeof cloud.searchRestaurants === "function") && flightEditable();
+document.addEventListener("input", e => {
+  const m = /^rs-(area|date|time|meal|cuisine|budget|diet|notes)$/.exec(e.target.id || ""); if (!m || !rsForm) return;
+  rsForm[m[1]] = e.target.value;
+  if (["area", "date", "time", "meal"].includes(m[1]) && rsForm.slot) {
+    rsForm.slot = ""; // 改了地點或時間就不再綁定行程中的那一餐
+    document.querySelector(".rs-bound")?.remove();
+  }
+});
+const sym = c => ({ JPY: "¥", TWD: "NT$ ", USD: "US$ ", KRW: "₩", EUR: "€" }[c] || (c ? c + " " : ""));
+const rPrice = r => r.priceMin || r.priceMax ? `每人 ${sym(r.currency)}${num(r.priceMin || r.priceMax)}${r.priceMax && r.priceMin && r.priceMax !== r.priceMin ? `–${num(r.priceMax)}` : ""}` : "";
+function sortRestaurants(g) {
+  const list = g.restaurants.map((r, i) => ({ r, i }));
+  const mode = rsSort[g.id] || "";
+  if (mode === "rating") list.sort((a, b) => (avgStars(b.r) ?? -1) - (avgStars(a.r) ?? -1) || a.i - b.i);
+  if (mode === "price") list.sort((a, b) => (a.r.partyEstimateTwd ?? a.r.priceMin ?? Infinity) - (b.r.partyEstimateTwd ?? b.r.priceMin ?? Infinity) || a.i - b.i);
+  return list;
+}
+const slotLabel = (t, g) => {
+  const p = t.dayPlans.find(x => x.date && x.date === g.date);
+  return [p ? `Day ${p.day}` : "", g.date ? fmtDate(g.date) : "", g.time, g.meal].filter(Boolean).join(" ");
+};
+
+function diningHtml(t) {
+  const D = t.dining, edit = flightEditable();
+  const meals = tripMeals(t);
+  if (!rsForm || rsForm.tripId !== t.id) rsForm = { tripId: t.id, slot: "", area: "", date: t.startDate || "", time: "", meal: "晚餐", cuisine: "", budget: "", diet: t.request?.diet || "", notes: "" };
+  const pickBySlot = new Map(D.picks.filter(p => p.slot).map(p => [p.slot, p]));
+
+  const total = D.picks.reduce((s, p) => s + (p.partyEstimateTwd || 0), 0);
+  const need = D.picks.filter(p => p.reservation === "required" || p.reservation === "recommended");
+  const summary = D.picks.length ? `<div class="tk-summary">
+      <span>已選餐廳 <b>${D.picks.length}</b> 家${total ? `・全體約 <b class="mono">NT$ ${num(total)}</b>` : ""}</span>
+      ${need.length ? `<span>需要訂位 <b>${need.length}</b> 家・已訂位 <b>${need.filter(p => p.booked).length}</b> 家</span>` : ""}
+    </div>
+    <ul class="rs-picks">${D.picks.map(p => {
+      const conf = edit && p.booked ? store.get(`rb.diningconf.${t.id}.${p.id}`, "") : "";
+      return `<li class="ht-pick"><div class="ht-pick-main"><span class="tk-badge ${RSV[p.reservation].cls}">${RSV[p.reservation].label}</span> <b>${esc(p.name)}</b>
+          <div class="status">${esc(slotLabel(t, p) || "時間未定")}${p.partyEstimateTwd ? `・全體約 NT$ ${num(p.partyEstimateTwd)}` : ""}${p.reservation === "required" || p.reservation === "recommended" ? `・<span class="fl-state ${p.booked ? "ok" : ""}">${p.booked ? "已訂位" : "尚未訂位"}</span>` : ""}</div></div>
+        ${edit ? `<div class="fl-chosen-actions">
+          ${p.reservation === "required" || p.reservation === "recommended" ? `<button class="btn" type="button" data-rs="booked" data-id="${esc(p.id)}">${p.booked ? "改為尚未訂位" : "標示已訂位"}</button>` : ""}
+          <button class="btn ghost" type="button" data-rs="unpick" data-id="${esc(p.id)}">取消選擇</button></div>
+          ${p.booked ? `<div class="fl-pnr"><label for="rsConf-${esc(p.id)}">訂位確認碼（只存在這台電腦，不會分享出去）</label>
+            <div class="fl-pnr-row"><input id="rsConf-${esc(p.id)}" maxlength="40" autocomplete="off" value="${esc(conf)}"><button class="btn" type="button" data-rs="conf" data-id="${esc(p.id)}">儲存</button></div></div>` : ""}` : ""}
+      </li>`;
+    }).join("")}</ul>` : "";
+
+  const mealList = edit && meals.length ? `<details class="tr-legs rs-meals"${D.searches.length ? "" : " open"}><summary>行程中的用餐（${meals.length} 餐）</summary><ul>${meals.map(m => {
+      const p = pickBySlot.get(m.slot);
+      return `<li><b>Day ${m.day}</b> ${esc([m.date && fmtDate(m.date), m.time, m.meal].filter(Boolean).join(" "))}：${esc(m.title)}
+        ${p ? `<span class="tk-done">已選 ${esc(p.name)}</span>` : ""}
+        <button class="btn ghost rs-find" type="button" data-rs="slot" data-slot="${esc(m.slot)}">為這餐找餐廳</button></li>`;
+    }).join("")}</ul></details>` : "";
+
+  const f = rsForm;
+  const boundMeal = f.slot && meals.find(m => m.slot === f.slot);
+  const form = edit ? `
+    ${boundMeal ? `<p class="rs-bound">正在為 <b>Day ${boundMeal.day} ${esc(boundMeal.time)} ${esc(boundMeal.meal)}</b>（${esc(boundMeal.title)}）找餐廳，選定後會改寫這一餐。</p>` : ""}
+    <div class="ht-form">
+      <div class="field ht-area"><label for="rs-area">地區或景點 *</label><input id="rs-area" value="${esc(f.area)}" placeholder="例：祇園、錦市場、道頓堀"></div>
+      <div class="field"><label for="rs-date">日期</label><input id="rs-date" type="date" value="${esc(f.date)}"></div>
+      <div class="field"><label for="rs-time">時間</label><input id="rs-time" type="time" value="${esc(f.time)}"></div>
+      <div class="field"><label for="rs-meal">用餐</label><select id="rs-meal">${MEALS.map(m => `<option${m === f.meal ? " selected" : ""}>${m}</option>`).join("")}</select></div>
+      <div class="field"><label for="rs-cuisine">想吃的料理</label><input id="rs-cuisine" value="${esc(f.cuisine)}" placeholder="例：壽喜燒、拉麵"></div>
+      <div class="field"><label for="rs-budget">每人預算（NT$）</label><input id="rs-budget" type="number" min="0" step="100" value="${esc(f.budget)}" placeholder="不限"></div>
+      <div class="field"><label for="rs-diet">飲食限制</label><input id="rs-diet" value="${esc(f.diet)}" placeholder="例：不吃牛、海鮮過敏"></div>
+      <div class="field ht-notes"><label for="rs-notes">其他需求</label><input id="rs-notes" value="${esc(f.notes)}" placeholder="例：要有座位、可帶嬰兒車、想看夜景"></div>
+    </div>
+    <div class="actions ht-tools">
+      ${canSearchDining()
+        ? `<button class="btn primary" type="button" data-rs="search"${rsBusy ? " disabled" : ""}>${rsBusy ? "搜尋中…" : "搜尋附近餐廳"}</button>
+           <button class="btn ghost" type="button" data-rs="query">改用 claude.ai 查詢</button>`
+        : `<button class="btn primary" type="button" data-rs="query">搜尋附近餐廳</button>`}
+    </div>
+    ${rsBusy ? `<p class="status lk-busy" role="status">正在上網搜尋${esc(rsBusy)}附近的餐廳，約需 15～50 秒，請稍候…</p>` : ""}`
+    : (meta.source === "sample" ? `<p class="status">範例行程不能修改。建立或匯入自己的行程後，就能為每一餐找餐廳。</p>` : "");
+
+  const isPicked = (g, r) => D.picks.some(p => p.name === r.name && p.date === g.date && p.time === g.time);
+  const groups = D.searches.map(g => `<div class="lk-airline ht-group">
+      <div class="lk-head"><h4>${esc(g.area)}附近</h4><small>${esc(slotLabel(t, g) || "時間未定")}・查詢日期 ${esc(g.fetchedAt || "—")}</small>
+        ${edit ? `<button class="btn ghost" type="button" data-rs="requery" data-gid="${esc(g.id)}">重新搜尋</button><button class="btn ghost" type="button" data-rs="remove" data-gid="${esc(g.id)}">移除</button>` : ""}</div>
+      ${g.note ? `<p class="lk-note">${esc(g.note)}</p>` : ""}
+      ${g.sources.length ? `<details class="lk-sources"><summary>搜尋時參考的網頁（${g.sources.length}）</summary><ul>${g.sources.map(x => `<li><a href="${esc(x.uri)}" target="_blank" rel="noopener">${esc(x.title || x.uri)}</a></li>`).join("")}</ul></details>` : ""}
+      ${g.restaurants.length > 1 ? `<div class="ht-sort" role="group" aria-label="排序">排序：${[["", "推薦順序"], ["rating", "評分高到低"], ["price", "價格低到高"]].map(([k, label]) =>
+          `<button class="chip" type="button" data-rs="sort" data-gid="${esc(g.id)}" data-sort="${k}" aria-pressed="${(rsSort[g.id] || "") === k}">${label}</button>`).join("")}</div>` : ""}
+      ${g.restaurants.length ? `<ul class="ht-list">${sortRestaurants(g).map(({ r, i }) => {
+        const picked = isPicked(g, r), rv = RSV[r.reservation];
+        return `<li class="ht-card${picked ? " picked" : ""}"><div class="ht-main">
+          <div class="ht-name"><span class="tk-badge ${rv.cls}">${rv.label}</span> <b>${esc(r.name)}</b>${r.nameLocal && r.nameLocal !== r.name ? ` <small>${esc(r.nameLocal)}</small>` : ""}${r.cuisine ? ` <span class="tr-type">${esc(r.cuisine)}</span>` : ""}</div>
+          <div class="ht-meta">${[r.area, r.access, r.walkMin ? `步行約 ${r.walkMin} 分` : ""].filter(Boolean).map(esc).join("・")}</div>
+          <div class="ht-price">${rPrice(r) ? esc(rPrice(r)) : `<span class="lk-wait">價位未查到</span>`}${r.partyEstimateTwd ? `・全體約 <b class="mono">NT$ ${num(r.partyEstimateTwd)}</b>${r.fxNote ? `<small>（${esc(r.fxNote)}）</small>` : ""}` : ""}</div>
+          <div class="ht-rating">${r.ratings.length ? `${starsHtml(avgStars(r))}<b class="mono">${avgStars(r)}</b>
+            <small>${r.ratings.map(x => `${esc(x.site)} ${x.score}／${x.outOf}${x.reviews ? `（${num(x.reviews)} 則）` : ""}`).join("・")}</small>` : `<small class="lk-wait">沒有查到網路評分</small>`}</div>
+          ${r.signature ? `<div class="ht-good">招牌：${esc(r.signature)}</div>` : ""}
+          ${r.familyNote ? `<div class="ht-good">${esc(r.familyNote)}</div>` : ""}
+          ${r.dietNote ? `<div class="ht-good">飲食限制：${esc(r.dietNote)}</div>` : ""}
+          ${r.reservationHow || r.bookingWindow ? `<div class="tk-window">${[r.reservationHow && `訂位：${r.reservationHow}`, r.bookingWindow].filter(Boolean).map(esc).join("・")}</div>` : ""}
+          ${r.openingHours || r.closedDays ? `<div class="tk-meta">${[r.openingHours && `營業 ${r.openingHours}`, r.closedDays && `公休 ${r.closedDays}`].filter(Boolean).map(esc).join("・")}</div>` : ""}
+          ${r.tips ? `<div class="ht-good">${esc(r.tips)}</div>` : ""}
+          ${r.cautions ? `<div class="ht-warn">注意：${esc(r.cautions)}</div>` : ""}
+          <div class="lk-links">${r.channels.map(c => `<a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.name)}</a>`).join("")}
+            ${r.source ? `<a href="${esc(r.source)}" target="_blank" rel="noopener">來源</a>` : `<span class="lk-nosrc">無來源</span>`}
+            <a href="${gmap(r.nameLocal || r.name)}" target="_blank" rel="noopener">地圖</a></div>
+        </div>
+        ${edit ? `<button class="btn ${picked ? "primary" : ""}" type="button" data-rs="choose" data-gid="${esc(g.id)}" data-i="${i}"${picked ? " disabled" : ""}>${picked ? "已選" : "選這家"}</button>` : (picked ? `<span class="badge-chosen">已選</span>` : "")}
+        </li>`;
+      }).join("")}</ul>` : `<p class="status">沒有找到符合的餐廳。</p>`}
+    </div>`).join("");
+
+  return `
+  <section class="block" id="dining">
+    <h2>餐廳 <span class="eyebrow">Dining</span></h2>
+    <div class="panel">
+      ${summary}${mealList}${form}${groups}
+      ${D.searches.length ? `<p class="status">價位、評分、營業時間與訂位方式是從網路查到的參考值；選這家後會改寫行程中的那一餐，需要訂位的排進預訂時程。預算的「餐飲」是全部餐費的估算，不會自動調整。網站不代為訂位。</p>` : ""}
+    </div>
+  </section>`;
+}
+
+/** 已選的餐廳寫回：每日行程中的那一餐、預訂時程（需訂位的） */
+function applyDiningToPlan(t) {
+  const people = passengers(t);
+  for (const p of t.dining.picks) {
+    const day = p.slot ? t.dayPlans.find(d => String(d.day) === p.slot.split("|")[0]) : t.dayPlans.find(d => d.date && d.date === p.date);
+    if (!day) continue;
+    const time = p.slot ? p.slot.split("|")[1] : p.time;
+    const payload = {
+      time: time || p.time || "", type: "food", diningPick: p.id,
+      title: `${p.meal || mealOf("", time) || "用餐"}：${p.name}`, place: p.nameLocal || p.name,
+      detail: [p.cuisine, p.signature && `招牌 ${p.signature}`, p.access].filter(Boolean).join("；"),
+      cost: [rPrice(p), p.partyEstimateTwd && `全體約 NT$ ${num(p.partyEstimateTwd)}`].filter(Boolean).join("・"),
+      tip: p.reservation === "required" || p.reservation === "recommended"
+        ? `${RSV[p.reservation].label}${p.reservationHow ? `（${p.reservationHow}）` : ""}${p.booked ? "，已訂位" : ""}` : (p.cautions || ""),
+    };
+    const idx = day.items.findIndex(it => it.diningPick === p.id || (it.type === "food" && (it.time || "") === (time || "")));
+    if (idx >= 0) day.items[idx] = { ...day.items[idx], ...payload };
+    else if (payload.time) {
+      day.items.push(payload);
+      day.items.sort((a, b) => (a.time || "").localeCompare(b.time || ""));
+    }
+  }
+  const core = n => n.split(/[（(]/)[0].trim();
+  t.bookings = t.bookings.filter(b => !String(b.auto || "").startsWith("dining:"));
+  const manual = t.bookings.map(b => String(b.what || ""));
+  for (const p of t.dining.picks.filter(p => p.reservation === "required" || p.reservation === "recommended")) {
+    if (manual.some(w => w.includes(core(p.name)))) continue;
+    t.bookings.push({ auto: "dining:" + p.id, when: p.bookingWindow || "出發前",
+      what: `${p.name} 訂位（${[p.date && fmtDate(p.date), p.time, p.meal].filter(Boolean).join(" ")}，${people} 人）`,
+      note: [p.booked ? "已訂位" : "", p.reservationHow].filter(Boolean).join("；") });
+  }
+}
+
+function diningPrompt(t, f) {
+  const p = partyOf(t);
+  const who = [p.adults && `成人 ${p.adults}`, p.seniors && `長輩（65 歲以上）${p.seniors}`, p.kids && `兒童 ${p.kids}${p.kidAges ? `（${p.kidAges} 歲）` : ""}`].filter(Boolean).join("、");
+  return `請使用網路搜尋，查詢「${t.dest.city || ""} ${f.area}」附近適合的餐廳，列出 5～8 家讓我比較。
+
+- 日期與時間：${f.date || "未定"} ${f.time || ""}（${f.meal || "用餐"}）
+- 用餐人數：${who}
+- 想吃的料理：${f.cuisine || "不限，以當地特色為主"}
+- 每人預算（新台幣）：${f.budget || "不限"}
+- 飲食限制：${f.diet || "無"}（無法配合的餐廳不要列入）
+- 其他需求：${f.notes || "無"}
+
+每家餐廳請提供：cuisine 料理、area 與 access 交通、walkMin 步行分鐘；priceMin、priceMax 每人價位與 currency 幣別；partyEstimateTwd 全體估算新台幣與 fxNote 匯率；
+ratings 網路評比（每個網站一筆，最多 3 個：site、score、outOf、reviews）；reservation：required（必須訂位）、recommended（建議訂位）、walkin（不需訂位）、not_accepted（不接受訂位），reservationHow 訂位方式、bookingWindow 何時開放訂位；
+openingHours、closedDays（當天公休或時段不營業要寫在 cautions）；signature 招牌菜、familyNote 長輩或兒童的友善程度、dietNote 能否配合飲食限制、tips、cautions；channels 訂位或資訊管道（最多 3 個，附網址）；source 主要資料網址；nameLocal 當地語言或英文正式名稱。
+不要編造餐廳、價格、評分或網址，查不到的留空或填 0。
+
+直接在對話中回覆，不要建立 artifact 或檔案。最後只回覆一個 \`\`\`json 程式碼區塊，格式：
+{"restaurants":[{"name":"","nameLocal":"","cuisine":"","area":"","access":"","walkMin":0,"priceMin":0,"priceMax":0,"currency":"JPY","partyEstimateTwd":0,"fxNote":"","ratings":[{"site":"Google","score":0,"outOf":5,"reviews":0}],"reservation":"recommended","reservationHow":"","bookingWindow":"","openingHours":"","closedDays":"","signature":"","familyNote":"","dietNote":"","tips":"","cautions":"","channels":[{"name":"Tabelog","url":"https://..."}],"source":"https://..."}],"note":""}`;
+}
+
+function addDiningSearch(group) {
+  const others = trip.dining.searches.filter(g => !(g.id === group.id || (g.area === group.area && g.date === group.date && g.time === group.time)));
+  const [norm] = normalizeDining({ searches: [group] }).searches;
+  trip.dining = { ...trip.dining, searches: [norm, ...others].slice(0, 12) };
+  return norm;
+}
+
+let rsPending = null;
+async function importDining(text) {
+  const st = $("#importStatus");
+  try {
+    const raw = String(text || "").trim();
+    const fences = [...raw.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+    const body = (fences.length ? fences[fences.length - 1][1] : raw).trim();
+    let data;
+    try { data = JSON.parse(body); } catch { data = extractJson(body); }
+    const list = Array.isArray(data) ? data : data?.restaurants;
+    if (!Array.isArray(list)) throw new Error("找不到 restaurants 餐廳清單");
+    const f = rsPending || { area: "未指定地點" };
+    const g = addDiningSearch({ id: f.id, area: f.area, date: f.date, time: f.time, meal: f.meal, slot: f.slot, restaurants: list, note: data?.note || "", fetchedAt: new Date().toISOString().slice(0, 10) });
+    rsPending = null;
+    $("#promptPanel").hidden = true;
+    if (await persistTrip(g.restaurants.length ? `已加入${g.area}附近的 ${g.restaurants.length} 家餐廳` : "沒有找到符合的餐廳")) $("#dining").scrollIntoView({ block: "start" });
+  } catch (err) {
+    st.className = "status err";
+    st.textContent = err instanceof SyntaxError
+      ? "JSON 格式有誤，常見原因是回覆被截斷。請請 Claude「繼續」或重新產生，再貼一次完整內容。"
+      : "無法匯入：" + err.message + "。請確認貼上的是 Claude 回覆中的 JSON。";
+  }
+}
+
+async function directDiningSearch(f, gid) {
+  if (rsBusy) return;
+  const t = trip;
+  rsBusy = f.area; show(t, meta);
+  let r;
+  try {
+    r = await cloud.searchRestaurants({ area: f.area, city: t.dest.city || "", date: f.date || "", time: f.time || "", meal: f.meal || "",
+      cuisine: f.cuisine || "", budgetPerPersonTwd: +f.budget || 0, diet: f.diet || "", notes: f.notes || "", ...partyOf(t) });
+  } catch { r = { available: false, reason: "搜尋失敗，請稍後再試。" }; }
+  rsBusy = "";
+  if (trip !== t) return;
+  if (!r || !r.available) { show(trip, meta); toast(r?.reason || "搜尋失敗，請稍後再試。"); return; }
+  const g = addDiningSearch({ id: gid, area: f.area, date: f.date, time: f.time, meal: f.meal, slot: f.slot, restaurants: r.restaurants, note: r.note, sources: r.sources, fetchedAt: r.fetchedAt });
+  if (await persistTrip(g.restaurants.length ? `已找到${g.area}附近的 ${g.restaurants.length} 家餐廳` : "沒有找到符合的餐廳")) document.querySelector("#dining .ht-group")?.scrollIntoView({ block: "start" });
+}
+
+$("#book").addEventListener("click", async e => {
+  const b = e.target.closest("[data-rs]"); if (!b || !trip) return;
+  const act = b.dataset.rs, D = trip.dining;
+  if (act === "sort") { rsSort[b.dataset.gid] = b.dataset.sort; return show(trip, meta); }
+  if (act === "slot") {
+    const m = tripMeals(trip).find(x => x.slot === b.dataset.slot); if (!m) return;
+    const area = String(m.place || m.area || "").replace(/\s*(京料理|拉麵|燒肉|壽喜燒|餐廳|お好み焼き|湯豆腐)$/, "").trim() || m.area;
+    rsForm = { ...rsForm, slot: m.slot, area, date: m.date, time: m.time, meal: m.meal || rsForm.meal };
+    show(trip, meta);
+    $("#rs-area")?.scrollIntoView({ block: "center" });
+    return;
+  }
+  if (act === "search" || act === "query") {
+    const f = { ...rsForm, area: (rsForm.area || "").trim() };
+    if (!f.area) { $("#rs-area")?.focus(); toast("請先輸入地區或景點"); return; }
+    if (act === "search") return directDiningSearch(f);
+    rsPending = f;
+    return showPrompt(diningPrompt(trip, f), `搜尋${f.area}附近的餐廳`, "dining");
+  }
+  if (act === "requery") {
+    const g = D.searches.find(x => x.id === b.dataset.gid); if (!g) return;
+    const f = { ...rsForm, area: g.area, date: g.date, time: g.time, meal: g.meal, slot: g.slot, id: g.id };
+    if (canSearchDining()) return directDiningSearch(f, g.id);
+    rsPending = f;
+    return showPrompt(diningPrompt(trip, f), `搜尋${g.area}附近的餐廳`, "dining");
+  }
+  if (!flightEditable()) return;
+  if (act === "remove") {
+    if (b.dataset.confirm !== "1") { b.dataset.confirm = "1"; b.textContent = "確認移除"; return; }
+    trip.dining = { ...D, searches: D.searches.filter(x => x.id !== b.dataset.gid) };
+    return persistTrip("已移除這組搜尋結果");
+  }
+  if (act === "choose") {
+    const g = D.searches.find(x => x.id === b.dataset.gid); const r = g?.restaurants[+b.dataset.i]; if (!r) return;
+    // 沒有指定哪一餐時，當天已有同一餐（例如晚餐）就取代那一餐，避免一天出現兩頓晚餐
+    const matched = !g.slot && g.date && g.meal ? tripMeals(trip).find(m => m.date === g.date && m.meal === g.meal) : null;
+    const slot = g.slot || matched?.slot || "";
+    const pick = { ...r, id: `dp-${Date.now().toString(36)}`, date: g.date, time: matched?.time || g.time, meal: g.meal, slot, booked: false };
+    // 同一餐只留一家：同一個行程時段，或同一天同一時間
+    const same = x => (slot && x.slot === slot) || (!slot && x.date === g.date && x.time === g.time);
+    trip.dining = normalizeDining({ ...D, picks: [...D.picks.filter(x => !same(x)), pick] });
+    applyDiningToPlan(trip);
+    if (await persistTrip(g.slot || g.date ? "已選定餐廳，行程中的這一餐已更新" : "已選定餐廳")) $("#dining").scrollIntoView({ block: "start" });
+    return;
+  }
+  if (act === "unpick") {
+    trip.dining = { ...D, picks: D.picks.filter(x => x.id !== b.dataset.id) };
+    applyDiningToPlan(trip);
+    return persistTrip("已取消選擇；行程中的這一餐保留目前內容，可再為它選其他餐廳");
+  }
+  if (act === "booked") {
+    trip.dining = { ...D, picks: D.picks.map(x => x.id === b.dataset.id ? { ...x, booked: !x.booked } : x) };
+    applyDiningToPlan(trip);
+    return persistTrip(D.picks.find(x => x.id === b.dataset.id)?.booked ? "已改為尚未訂位" : "已標示已訂位");
+  }
+  if (act === "conf") {
+    store.set(`rb.diningconf.${trip.id}.${b.dataset.id}`, ($(`#rsConf-${b.dataset.id}`)?.value || "").trim());
+    return toast("訂位確認碼已存在這台電腦");
   }
 });
 
